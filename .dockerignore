@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+# .env
+.venv
+venv/
+build/
+dist/
+*.db
+*.sqlite3
+*.log
+*.csv
+*.xlsx
+*.h5
+*.nc
+*.parquet
+*.feather
+*.zip
+*.tar
+*.gz
+*.egg-info/
+.git/
+.idea/
+.vscode/

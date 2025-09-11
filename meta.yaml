@@ -1,0 +1,29 @@
+package:
+  name: buem
+  version: "0.1.0"
+
+source:
+  path: .
+
+build:
+  noarch: python
+  script: python -m pip install .
+
+requirements:
+  host:
+    - python >=3.11
+    - pip
+  run:
+    - python >=3.11
+    - matplotlib
+    - numpy
+    - pandas
+    - pvlib
+    - scipy
+    - sympy
+    - openpyxl
+    - cvxpy
+
+about:
+  summary: "Building thermal simulation module (ISO 52016-1 5R1C)"
+  license: MIT

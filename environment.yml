@@ -1,0 +1,14 @@
+name: buem_env
+channels:
+  - conda-forge
+  - default
+dependencies:
+  - python>=3.11
+  - matplotlib
+  - numpy
+  - pandas
+  - pvlib
+  - scipy
+  - sympy
+  - openpyxl
+  - cvxpy

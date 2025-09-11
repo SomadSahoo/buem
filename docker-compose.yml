@@ -1,0 +1,10 @@
+services:
+  buem:
+    build: .
+    container_name: buem
+    working_dir: /app
+    environment:
+      - PYTHONPATH=/app/src
+    command: conda run -n buem_env python -m buem.main
+    volumes:
+      - .:/app
