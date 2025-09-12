@@ -49,6 +49,30 @@ To build and install with conda:
    conda install --use-local buem
 ```
 
+## Docker Setup and Usage
+
+You can also run BUEM using Docker Compose for a fully reproducible environment.
+
+### 1. Build and run with Docker Compose
+
+From the project root, run:
+```bash
+docker compose up --build
+```
+This will build the Docker image (if needed) and run the model.
+
+### 2. (Optional) Force a clean build
+
+If you want to ensure everything is rebuilt from scratch:
+```bash
+docker compose build --no-cache
+docker compose up
+```
+
+### Notes
+
+- Output files (e.g., plots) will be saved to the `output/` directory if configured.
+- You can modify the configuration or mount additional volumes as needed.
 
 ## Usage
 
