@@ -76,15 +76,42 @@ docker compose up
 
 ## Usage
 
-Run the example (with dummy data) from the command line:
+### 1. Run the model via the main entry point
+
+If you have installed BUEM with `pip install -e .` or `pip install .` (from the project root), you can run:
+
 ```bash
-python -m src.buem.thermal.modelbuem
+python -m buem.main
 ```
 
-Or import the `ModelBUEM` class in your own scripts:
+Or, if you installed via pip and set up the CLI script, you can simply run:
+```bash
+buem
+```
+
+### 2. Run the model without installing (development mode)
+
+If you have **not** installed the package, but want to run it directly from the source, use:
+
+```bash
+python -m src.buem.main
+```
+(from the project root)
+
+### 3. Import and use in your own scripts
+
+You can also import the main class and use it programmatically:
+
 ```python
 from buem.thermal.model_buem import ModelBUEM
+from buem.config.cfg_attribute import cfg
+
+model = ModelBUEM(cfg)
+model.sim_model(use_inequality_constraints=False)
+# Access results, plot, etc.
 ```
+
+---
 
 ## Requirements
 
@@ -100,6 +127,14 @@ Other python-based modules
 - sympy
 - openpyxl
 - cvxpy
+
+## Notes
+
+- If you use Docker or Conda, follow the respective instructions above.
+- Output files (e.g., plots) will be saved to the `output/` directory if configured.
+- For custom configuration, edit the files in `src/buem/config/`.
+
+---
 
 ## License
 
