@@ -2,14 +2,21 @@ import pandas as pd
 import numpy as np
 import os
 
+from buem.weather.from_csv import CsvWeatherData
+loader = CsvWeatherData("data/COSMO_Year__ix_389_660.csv")
+df_weather = loader.extract_weather_columns()
+df_weather.index = df_weather.index.tz_convert(None)
+
 # Dummy time index and profiles for testing
-n_hours = 8760
-dummy_index = pd.date_range("2025-01-01", periods=n_hours, freq="h")
+# n_hours = 8760
+# dummy_index = pd.date_range("2025-01-01", periods=n_hours, freq="h")
+main_index = df_weather.index
+n_hours = len(main_index)
 # Sinusoidal profile: mean 20°C, amplitude 5°C, period 24h (1 day), min 15°C, max 25°C
-temp_profile = 18 + 5 * np.sin(2 * np.pi * (np.arange(n_hours) % 24) / 24)
-ghi_profile = np.full(n_hours, 200)
-dni_profile = np.full(n_hours, 100)
-dhi_profile = np.full(n_hours, 50)
+temp_profile = df_weather["T"]
+ghi_profile = df_weather["GHI"]
+dni_profile = df_weather["DNI"]
+dhi_profile = df_weather["DHI"]
 
 cfg =  {
         "weather": pd.DataFrame({
@@ -17,18 +24,18 @@ cfg =  {
             "GHI": ghi_profile,  # global horizontal irradiance
             "DNI": dni_profile,  # direct normal irradiance
             "DHI": dhi_profile,  # diffuse horizontal irradiance
-        }, index=dummy_index),
+        }, index=df_weather.index),
         "costdatapath": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "default_2016.xlsx")),  
         "refurbishment": True,
         "force_refurbishment": False,
         "occControl": False,
         "nightReduction": False,
         "capControl": False,
-        "elecLoad": pd.Series([0.5]*n_hours, index=dummy_index),
-        "Q_ig": pd.Series([0.1]*n_hours, index=dummy_index),
+        "elecLoad": pd.Series([0.5]*n_hours, index=main_index),
+        "Q_ig": pd.Series([0.1]*n_hours, index=main_index),
 #         "Q_ig": pd.Series([0.3, 0.2], index=dummy_index),
-        "occ_nothome": pd.Series(0.5 * (1 + np.sin(np.linspace(-np.pi/2, 3*np.pi/2, n_hours))), index=dummy_index),  # 0 (home) at night, 1 (away) at noon
-        "occ_sleeping": pd.Series(0.5 * (1 - np.cos(np.linspace(0, 2*np.pi, n_hours))), index=dummy_index), # 1 at night, 0 during day
+        "occ_nothome": pd.Series(0.5 * (1 + np.sin(np.linspace(-np.pi/2, 3*np.pi/2, n_hours))), index=main_index),  # 0 (home) at night, 1 (away) at noon
+        "occ_sleeping": pd.Series(0.5 * (1 - np.cos(np.linspace(0, 2*np.pi, n_hours))), index=main_index), # 1 at night, 0 during day
         "latitude": 52.0,
         "longitude": 5.0,
         "A_Roof_1": 92.3,
