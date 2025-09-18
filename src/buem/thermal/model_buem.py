@@ -903,8 +903,8 @@ class ModelBUEM(object):
             # currently, we are doing a 50-50% split
             Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
 
-            # T_sur = (H_is * T_air + H_ms * T_m) / (H_is + H_ms) ---
-            # T_sur * (H_is + H_ms) - H_is * T_air - H_ms * T_m = 0
+            # T_sur = (H_is * T_air + H_ms * T_m + Q_sur) / (H_is + H_ms) ---
+            # T_sur * (H_is + H_ms) - H_is * T_air - H_ms * T_m = Q_sur
             # Equality: surface node energy balance
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_sur(i)] = H_is + H_ms
@@ -1187,7 +1187,7 @@ class ModelBUEM(object):
         ax1.plot(time_hours, T_e, label='External Temperature', color='gray', alpha=0.5)
         
         ax1.set_ylabel('Temperature [°C]')
-        ax1.set_title(f'Building Temperatures ({period})')
+        ax1.set_title(f'Building Temperatures ({period}) [A]')
         ax1.grid(True)
         ax1.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         
@@ -1196,7 +1196,7 @@ class ModelBUEM(object):
         ax2.plot(time_hours, self.heating_load[:n_hours], label='Heating Load', color='red')
         ax2.plot(time_hours, self.cooling_load[:n_hours], label='Cooling Load', color='blue')
         ax2.set_ylabel('Load [kW]')
-        ax2.set_title(f'Heating and Cooling Loads ({period})')
+        ax2.set_title(f'Heating and Cooling Loads ({period}) [B]')
         ax2.grid(True)
         ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         
@@ -1205,7 +1205,7 @@ class ModelBUEM(object):
         ax3.plot(time_hours, self.Q_ia[:n_hours], label='Internal Gains (Q_ia)', color='green')
         ax3.set_xlabel('Time [hours]')
         ax3.set_ylabel('Internal Gains [kW]')
-        ax3.set_title(f'Internal Gains ({period})')
+        ax3.set_title(f'Internal Gains ({period}) [C]')
         ax3.grid(True)
         ax3.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         
