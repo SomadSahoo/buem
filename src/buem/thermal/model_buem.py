@@ -745,19 +745,23 @@ class ModelBUEM(object):
         
         n = len(self.timeIndex)
         print(f"n: {n}")
-        self.n_vars = 5 * n   # [T_air, T_m, T_sur, Q_heat, Q_cool] for each timestep
+        self.n_vars = 4 * n   # [T_air, T_m, T_sur, Q_HC] for each timestep
         print(f"self.n_vars: {self.n_vars}")
 
         # Helper to get variable indices
         def idx_T_air(i): return i
         def idx_T_m(i): return n + i
         def idx_T_sur(i): return 2 * n + i
-        def idx_Q_heat(i): return 3 * n + i
-        def idx_Q_cool(i): return 4 * n + i
+        def idx_Q_HC(i): return 3 * n + i
+        # def idx_Q_cool(i): return 4 * n + i
 
         # Prepare lists for equality and inequality constraints
         eq_rows, eq_vals = [], []
         ineq_rows, ineq_vals = [], []
+
+        # Initialization of series of Q_sol for plotting 
+        self.Q_sol_win_series = []
+        self.Q_sol_opaque_series = []
 
         # --- Calculate conductances for each component group ---
         # Walls, Roofs, Floors, Windows, Doors
@@ -837,8 +841,10 @@ class ModelBUEM(object):
                 Q_sol_win += (
                     A_win * g_gl * F_sh * F_w * (1 - F_f) * irrad
                 )  # [W], but all areas in m2, G in W/m2 # Check
-
+                
             Q_sol_win = Q_sol_win / 1000  # [kW]
+            self.Q_sol_win_series.append(Q_sol_win)
+
 
             # Opaque solar gains (walls, roofs, floors)
             Q_sol_opaque = 0.0
@@ -873,6 +879,8 @@ class ModelBUEM(object):
                             A * alpha * F_sh * irrad
                         ) / 1000  # [kW] # Check units for if and else
 
+            self.Q_sol_opaque_series.append(Q_sol_opaque)
+
             # --- 1. Air node: Energy balance for the air node
             # T_air = (H_is * T_sur + Q_ia + H_ve * T_e) / (H_is + H_ve) ---
             # Internal gains = Q_ig + elecLoad
@@ -893,7 +901,7 @@ class ModelBUEM(object):
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_air(i)] = H_is + H_ve
             row[0, idx_T_sur(i)] = -H_is
-            # row[0, idx_Q_heat(i)] = -1
+            row[0, idx_Q_HC(i)] = -1
             # row[0, idx_Q_cool(i)] = -1
             eq_rows.append(row)
             eq_vals.append(Q_air + H_ve * T_e)
@@ -907,11 +915,11 @@ class ModelBUEM(object):
             # T_sur * (H_is + H_ms) - H_is * T_air - H_ms * T_m = Q_sur
             # Equality: surface node energy balance
             row = lil_matrix((1, self.n_vars))
-            row[0, idx_T_sur(i)] = H_is + H_ms
+            row[0, idx_T_sur(i)] = H_is + H_ms + H_windows
             row[0, idx_T_air(i)] = -H_is
             row[0, idx_T_m(i)] = -H_ms
             eq_rows.append(row)
-            eq_vals.append(Q_surface)          
+            eq_vals.append(Q_surface + H_windows*T_e)  
 
             # --- 3. Mass node: Dynamic energy balance for the mass node, including coupling to surface and transmission to outside
             # C_m * (T_m_next - T_m) / step = H_ms * (T_sur - T_m) - H_tr * (T_m - T_e) ---
@@ -947,17 +955,17 @@ class ModelBUEM(object):
                 
                 # Q_heat = H_tot * max(0, T_set - T_air)
                 row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_heat(i)] = 1
+                row[0, idx_Q_HC(i)] = 1
                 row[0, idx_T_air(i)] = H_tot
                 eq_rows.append(row)
                 eq_vals.append(H_tot * T_set)
 
                 # Q_cool = H_tot * max(0, T_air - T_set)
-                row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_cool(i)] = 1
-                row[0, idx_T_air(i)] = -H_tot
-                eq_rows.append(row)
-                eq_vals.append(-H_tot * T_set)
+                # row = lil_matrix((1, self.n_vars))
+                # row[0, idx_Q_HC(i)] = 1
+                # row[0, idx_T_air(i)] = -H_tot
+                # eq_rows.append(row)
+                # eq_vals.append(-H_tot * T_set)
             
             else:
                 # Comfort bounds (inequality) comfort_ub >= T_air >= comfort_lb
@@ -971,26 +979,26 @@ class ModelBUEM(object):
                 ineq_vals.append(-T_air_min)
                 
                 # Q_heat >= H_tot * (comfort_lb - T_air), Q_heat >= 0
-                row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_heat(i)] = -1
-                row[0, idx_T_air(i)] = H_tot
-                ineq_rows.append(row)
-                ineq_vals.append(H_tot * comfortT_lb)
-                row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_heat(i)] = -1
-                ineq_rows.append(row)
-                ineq_vals.append(0)
+                # row = lil_matrix((1, self.n_vars))
+                # row[0, idx_Q_heat(i)] = -1
+                # row[0, idx_T_air(i)] = H_tot
+                # ineq_rows.append(row)
+                # ineq_vals.append(H_tot * comfortT_lb)
+                # row = lil_matrix((1, self.n_vars))
+                # row[0, idx_Q_heat(i)] = -1
+                # ineq_rows.append(row)
+                # ineq_vals.append(0)
                 
                 # Q_cool >= H_tot * (T_air - comfort_ub), Q_cool >= 0
-                row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_cool(i)] = -1
-                row[0, idx_T_air(i)] = -H_tot
-                ineq_rows.append(row)
-                ineq_vals.append(-H_tot * comfortT_ub)
-                row = lil_matrix((1, self.n_vars))
-                row[0, idx_Q_cool(i)] = -1
-                ineq_rows.append(row)
-                ineq_vals.append(0) 
+                # row = lil_matrix((1, self.n_vars))
+                # row[0, idx_Q_cool(i)] = -1
+                # row[0, idx_T_air(i)] = -H_tot
+                # ineq_rows.append(row)
+                # ineq_vals.append(-H_tot * comfortT_ub)
+                # row = lil_matrix((1, self.n_vars))
+                # row[0, idx_Q_cool(i)] = -1
+                # ineq_rows.append(row)
+                # ineq_vals.append(0) 
 
                 # --- INEQUALITY: Surface and mass node bounds ---
                 # --- T_{sur, m}_min <= T_{sur, m}(t) <= T_{sur, m}_max
@@ -1130,9 +1138,11 @@ class ModelBUEM(object):
         self.T_air = x[0:n]
         self.T_m = x[n:2*n]
         self.T_sur = x[2*n:3*n]
-        self.heating_load = np.maximum(0, x[3*n:4*n])  # enforce non-negativity
-        self.cooling_load = np.maximum(0, x[4*n:5*n])  # enforce non-negativity
-
+        self.Q_HC = x[3*n:4*n]
+        # self.heating_load = np.maximum(0, x[3*n:4*n])  # enforce non-negativity
+        # self.cooling_load = np.maximum(0, x[4*n:5*n])  # enforce non-negativity
+        self.heating_load = np.maximum(0, self.Q_HC)
+        self.cooling_load = -np.minimum(0, self.Q_HC)
 
         # Call _readResults to process/store results further
         self._readResults()
@@ -1169,8 +1179,8 @@ class ModelBUEM(object):
             ])
         
         # Create figure with subplots
-        fig = plt.figure(figsize=(15, 12))
-        gs = GridSpec(3, 1, height_ratios=[2, 1, 1])
+        fig = plt.figure(figsize=(18, 10))
+        gs = GridSpec(3, 1, height_ratios=[1, 1, 1])
         
         # 1. Temperature plot
         ax1 = fig.add_subplot(gs[0])
@@ -1186,28 +1196,37 @@ class ModelBUEM(object):
         T_e = [self.profiles["T_e"][(1, t)] for t in range(n_hours)]
         ax1.plot(time_hours, T_e, label='External Temperature', color='gray', alpha=0.5)
         
-        ax1.set_ylabel('Temperature [°C]')
-        ax1.set_title(f'Building Temperatures ({period}) [A]')
+        ax1.set_ylabel('Temperature [°C]', fontsize=18)
+        ax1.set_title(f'Building Temperatures ({period}) [A]', fontsize=20, pad=20)
         ax1.grid(True)
-        ax1.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        ax1.legend(fontsize=16, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=2, framealpha=0.5)
         
         # 2. Loads plot
         ax2 = fig.add_subplot(gs[1])
-        ax2.plot(time_hours, self.heating_load[:n_hours], label='Heating Load', color='red')
-        ax2.plot(time_hours, self.cooling_load[:n_hours], label='Cooling Load', color='blue')
-        ax2.set_ylabel('Load [kW]')
-        ax2.set_title(f'Heating and Cooling Loads ({period}) [B]')
+        ax2.plot(time_hours, self.heating_load[:n_hours], label='Heating Demand', color='red')
+        ax2.plot(time_hours, self.cooling_load[:n_hours], label='Cooling Demand', color='blue')
+        ax2.set_ylabel('Demand [kWh/h]', fontsize=18)
+        ax2.set_title(f'Heating and Cooling Demands ({period}) [B]', fontsize=20, pad=20)
         ax2.grid(True)
-        ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        ax2.legend(fontsize=16, loc='best', framealpha=0.8)
         
-        # 3. Internal gains plot
+        # 3. Solar gains plot
         ax3 = fig.add_subplot(gs[2])
-        ax3.plot(time_hours, self.Q_ia[:n_hours], label='Internal Gains (Q_ia)', color='green')
-        ax3.set_xlabel('Time [hours]')
-        ax3.set_ylabel('Internal Gains [kW]')
-        ax3.set_title(f'Internal Gains ({period}) [C]')
+        ax3.plot(time_hours, self.Q_sol_win_series[:n_hours], label='Solar Gains Windows', color='darkgreen')
+        ax3.plot(time_hours, self.Q_sol_opaque_series[:n_hours], label='Solar Gains Opaque', color='magenta')
+        ax3.set_xlabel('Time [hours]', fontsize=20, labelpad=15)
+        ax3.set_ylabel('Solar Gains [kWh/h]', fontsize=18)
+        ax3.set_title(f'Solar Gains ({period}) [C]', fontsize=20, pad=20)
         ax3.grid(True)
-        ax3.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        ax3.legend(fontsize=16, loc='best', framealpha=0.8)
+
+        # Set font size for axis tick labels
+        for ax in [ax1, ax2, ax3]:
+            ax.tick_params(axis='x', labelsize=16)
+            ax.tick_params(axis='y', labelsize=16)
+
+        # Align y-labels for all subplots
+        fig.align_ylabels([ax1, ax2, ax3])
         
         # Adjust layout and display
         plt.tight_layout()

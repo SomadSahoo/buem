@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 from buem.weather.from_csv import CsvWeatherData
-loader = CsvWeatherData("data/COSMO_Year__ix_389_660.csv")
+loader = CsvWeatherData("data/COSMO_Year__ix_390_650.csv") #Loenen weather data
 df_weather = loader.extract_weather_columns()
 df_weather.index = df_weather.index.tz_convert(None)
 
@@ -18,6 +18,7 @@ ghi_profile = df_weather["GHI"]
 dni_profile = df_weather["DNI"]
 dhi_profile = df_weather["DHI"]
 
+# multi Family house (MFH), existing state refurbishment - NL.N.MFH.01.Gen
 cfg =  {
         "weather": pd.DataFrame({
             "T": temp_profile,  # external temp
@@ -38,32 +39,32 @@ cfg =  {
         "occ_sleeping": pd.Series(0.5 * (1 - np.cos(np.linspace(0, 2*np.pi, n_hours))), index=main_index), # 1 at night, 0 during day
         "latitude": 52.0,
         "longitude": 5.0,
-        "A_Roof_1": 92.3,
-        "A_Roof_2": 50.0,
-        "U_Roof_1": 0.15,
-        "U_Roof_2": 0.2,
+        "A_Roof_1": 497.7,
+#         "A_Roof_2": 128.1,
+        "U_Roof_1": 1.54,
+#         "U_Roof_2": 1.54,
         "b_Transmission_Roof_1": 1.0,
-        "b_Transmission_Roof_2": 1.0,
-        "A_Wall_1": 105.7,
-        "A_Wall_2": 162.0,
-        "A_Wall_3": 100.0,
-        "U_Wall_1": 0.27,
-        "U_Wall_2": 0.27,
-        "U_Wall_3": 0.3,
+#         "b_Transmission_Roof_2": 1.0,
+        "A_Wall_1": 1226.9,
+#         "A_Wall_2": 136.7,
+#         "A_Wall_3": 136.7,
+        "U_Wall_1": 1.61,
+#         "U_Wall_2": 1.61,
+#         "U_Wall_3": 1.61,
         "b_Transmission_Wall_1": 1.0,
-        "b_Transmission_Wall_2": 1.0,
-        "b_Transmission_Wall_3": 1.0,
-        "A_Floor_1": 21.5,
-        "A_Floor_2": 70.8,
-        "U_Floor_1": 0.29,
-        "U_Floor_2": 0.19,
+#        "b_Transmission_Wall_2": 1.0,
+#        "b_Transmission_Wall_3": 1.0,
+        "A_Floor_1": 469.0,
+#         "A_Floor_2": 93.0,
+        "U_Floor_1": 1.72,
+#         "U_Floor_2": 1.72,
         "b_Transmission_Floor_1": 1.0,
-        "b_Transmission_Floor_2": 1.0,
-        "A_Window": 19.1,
-        "U_Window": 1.4,
-        "A_Door_1": 1.8,
-        "U_Door_1": 1.7,
-        "A_ref": 159.0,
+#         "b_Transmission_Floor_2": 1.0,
+        "A_Window": 78.4,
+        "U_Window": 5.2,
+        "A_Door_1": 58.8,
+        "U_Door_1": 3.5,
+        "A_ref": 2064,
         "h_room": 2.5,
         "n_air_infiltration": 0.5,
         "n_air_use": 0.5,
