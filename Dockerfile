@@ -1,13 +1,11 @@
 FROM continuumio/miniconda3
 
-WORKDIR /app
-
 # install curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 # copy env and create conda env
 COPY environment.yml /app/
-RUN conda env create -f environment.yml && conda clean -afy
+RUN conda env create -f /app/environment.yml && conda clean -afy
 
 # ensure conda env bin is first on PATH so gunicorn/python are available directly
 ENV PATH=/opt/conda/envs/buem_env/bin:$PATH
@@ -15,6 +13,9 @@ ENV PYTHONPATH=/app/src
 
 # copy project
 COPY . /app
+
+# set work directory
+WORKDIR /app/src
 
 EXPOSE 5000
 
