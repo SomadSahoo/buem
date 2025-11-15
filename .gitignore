@@ -15,6 +15,7 @@ dist/
 *.log
 *.csv
 !src/buem/data/COSMO_Year__ix_389_660.csv
+!src/buem/data/COSMO_Year__ix_390_650.csv
 *.xlsx
 !src/buem/data/default_2016.xlsx
 *.h5
