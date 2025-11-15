@@ -11,8 +11,8 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./data/weather:/app/data/weather:ro
-      - ./logs:/app/logs:rw
+      - ./src/buem/data/weather:/app/data/weather:ro
+      - ./src/buem/logs:/app/logs:rw
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5000/api/health || exit 1"]
