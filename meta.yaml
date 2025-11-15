@@ -23,6 +23,9 @@ requirements:
     - sympy
     - openpyxl
     - cvxpy
+    - flask
+    - python-dotenv
+    - gunicorn
 
 about:
   summary: "Building thermal simulation module (ISO 52016-1 5R1C)"

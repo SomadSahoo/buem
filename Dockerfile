@@ -1,18 +1,22 @@
 FROM continuumio/miniconda3
 
-# create a working directory and copy into it
 WORKDIR /app
-COPY . /app
 
-# Set PYTHONPATH so you can run as a module
+# install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+# copy env and create conda env
+COPY environment.yml /app/
+RUN conda env create -f environment.yml && conda clean -afy
+
+# ensure conda env bin is first on PATH so gunicorn/python are available directly
+ENV PATH=/opt/conda/envs/buem_env/bin:$PATH
 ENV PYTHONPATH=/app/src
 
+# copy project
+COPY . /app
 
-# install dependencies
-RUN conda env create -f environment.yml
+EXPOSE 5000
 
-# command to use the conda environment by default
-# SHELL ["conda", "run", "-n", "buem_env", "/bin/bash", "-c"]
-
-# Default command: run as module
-CMD ["conda", "run", "-n", "buem_env", "python", "-m", "buem.main"]
+# run gunicorn directly (uses gunicorn from conda env installed via environment.yml)
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "buem.apis.api_server:create_app()", "--workers", "2", "--threads", "2"]

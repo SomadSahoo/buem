@@ -12,3 +12,6 @@ dependencies:
   - sympy
   - openpyxl
   - cvxpy
+  - flask
+  - python-dotenv
+  - gunicorn
