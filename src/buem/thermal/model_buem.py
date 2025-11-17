@@ -1,6 +1,5 @@
 import logging
 import pvlib
-import sympy as sp
 
 import cvxpy as cp
 
@@ -77,15 +76,6 @@ class ModelBUEM(object):
         self.floors = [k.replace('U_', '') for k in cfg if k.startswith('U_Floor')]
         self.windows = [k.replace('U_', '') for k in cfg if k.startswith('U_Window')]
         self.ventilations = [k.replace('U_', '') for k in cfg if k.startswith('U_Ventilation')]
-
-
-        # Symbolic variables for areas, U-values, and transmission factors
-        self.A = {name: sp.Symbol(f'A_{name}') for name in self.walls + self.roofs + self.floors}
-        self.U_existing = {name: sp.Symbol(f'U_{name}') for name in self.walls + self.roofs + self.floors}
-        self.b_Transmission = {name: sp.Symbol(f'b_Transmission_{name}') for name in self.walls + self.roofs + self.floors}
-
-
-
 
         # for each component, which refurbishment is chosen
         self.bInsul = {}
@@ -464,46 +454,6 @@ class ModelBUEM(object):
         -------
         designHeatLoad [kW]
         """
-        if symbolic:
-            # SymPy symbolic version
-            b = self.cfg
-            A_Roof_1, U_Roof_1, b_Transmission_Roof_1 = sp.symbols('A_Roof_1 U_Roof_1 b_Transmission_Roof_1')
-            A_Roof_2, U_Roof_2, b_Transmission_Roof_2 = sp.symbols('A_Roof_2 U_Roof_2 b_Transmission_Roof_2')
-            A_Wall_1, U_Wall_1, b_Transmission_Wall_1 = sp.symbols('A_Wall_1 U_Wall_1 b_Transmission_Wall_1')
-            A_Wall_2, U_Wall_2, b_Transmission_Wall_2 = sp.symbols('A_Wall_2 U_Wall_2 b_Transmission_Wall_2')
-            A_Wall_3, U_Wall_3, b_Transmission_Wall_3 = sp.symbols('A_Wall_3 U_Wall_3 b_Transmission_Wall_3')
-            A_Window, U_Window = sp.symbols('A_Window U_Window')
-            A_Door_1, U_Door_1 = sp.symbols('A_Door_1 U_Door_1')
-            A_Floor_1, U_Floor_1, b_Transmission_Floor_1 = sp.symbols('A_Floor_1 U_Floor_1 b_Transmission_Floor_1')
-            A_Floor_2, U_Floor_2, b_Transmission_Floor_2 = sp.symbols('A_Floor_2 U_Floor_2 b_Transmission_Floor_2')
-            A_ref, h_room, n_air_infiltration, n_air_use = sp.symbols('A_ref h_room n_air_infiltration n_air_use')
-            design_T_min = sp.symbols('design_T_min')
-
-            expr = (
-                A_Roof_1 * U_Roof_1 * b_Transmission_Roof_1
-                + A_Roof_2 * U_Roof_2 * b_Transmission_Roof_2
-                + A_Wall_1 * U_Wall_1 * b_Transmission_Wall_1
-                + A_Wall_2 * U_Wall_2 * b_Transmission_Wall_2
-                + A_Wall_3 * U_Wall_3 * b_Transmission_Wall_3
-                + A_Window * U_Window
-                + A_Door_1 * U_Door_1
-                + (
-                    A_ref
-                    * h_room
-                    * 1.2
-                    * 1006
-                    * (n_air_infiltration + n_air_use)
-                    / 3600
-                )
-            ) * (22.917 - design_T_min) + (
-                (
-                    A_Floor_1 * U_Floor_1 * b_Transmission_Floor_1
-                    + A_Floor_2 * U_Floor_2 * b_Transmission_Floor_2
-                )
-                * (22.917 - design_T_min)
-                * 1.45
-            )
-            return expr / 1000
         b = self.cfg
         designHeatLoad = (
             b["A_Roof_1"] * b["U_Roof_1"] * b["b_Transmission_Roof_1"]
@@ -634,19 +584,9 @@ class ModelBUEM(object):
         # Refurbishment decision variables (binary or continuous)
         self.exVars = {}   # Decision variables for each component and refurbishment decision
         self.bQ_comp = {}  # Heat flow through components 
-        for comp in self.components:
-            for dec in self.bInsul[comp]:
-                self.exVars[(comp, dec)] = sp.Symbol(f'exVar_{comp}_{dec}', real=True, nonnegative=True)
-                for t1, t2 in self.timeIndex:
-                    self.bQ_comp[(comp, dec, t1, t2)] = sp.Symbol(f'bQ_comp_{comp}_{dec}_{t1}_{t2}', real=True)
 
         # define/declare auxiliary variable for modeling heat flow on thermal mass surface
         self.bP_X = {}
-        for (dec_w, comp_w) in self.bX_windows:
-            for (dec_x, comp_x) in self.bX_solar:
-                self.bP_X[(dec_w, comp_w, dec_x, comp_x)] = sp.Symbol(
-                    f'bP_X_{dec_w}_{comp_w}_{dec_x}_{comp_x}', real=True, nonnegative=True
-                ) 
 
         if self.hasTypPeriods: #example: 365 days, 24 steps per day
             num_periods = 365  # or set dynamically
@@ -658,33 +598,17 @@ class ModelBUEM(object):
         self.bT_m = {}  # thermal mass node temperature
         self.bT_air = {}  # air node temperature
         self.bT_s = {}  # surface node temperature
-        for t1, t2 in self.timeIndex:
-            self.bT_m[(t1, t2)] = sp.Symbol(f'bT_m_{t1}_{t2}', real=True)
-            self.bT_air[(t1, t2)] = sp.Symbol(f'bT_air_{t1}_{t2}', real=True)
-            self.bT_s[(t1, t2)] = sp.Symbol(f'bT_s_{t1}_{t2}', real=True)
 
         # heat flow variables
         self.bQ_ia = {}  # heat flow to air node [kW]
         self.bQ_m = {}  # heat flow to thermal mass node [kW]
         self.bQ_st = {}  # heat flow to surface node [kW]
-        for t1, t2 in self.timeIndex:
-            self.bQ_ia[(t1, t2)] = sp.Symbol(f'bQ_ia_{t1}_{t2}', real=True)  
-            self.bQ_m[(t1, t2)] = sp.Symbol(f'bQ_m_{t1}_{t2}', real=True)  
-            self.bQ_st[(t1, t2)] = sp.Symbol(f'bQ_st_{t1}_{t2}', real=True)  
 
         # ventilation heat flow
         self.bQ_ve = {}  # heat flow through ventilation [kW]
-        for t1, t2 in self.timeIndex:
-            self.bQ_ve[(t1, t2)] = sp.Symbol(f'bQ_ve_{t1}_{t2}', real=True)
 
         # external heat losses including heat exchange
         self.bQ_comp = {}  
-        for (comp, dec) in self.insulIx:
-            for t1, t2 in self.timeIndex:
-                self.bQ_comp[(comp, dec, t1, t2)] = sp.Symbol(f'bQ_comp_{comp}_{dec}_{t1}_{t2}', real=True)
-
-        # design heat load
-        self.bQ_des = sp.Symbol('bQ_des', real=True, nonnegative=True)
 
         return            
                                     
