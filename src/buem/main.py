@@ -37,8 +37,10 @@ def run_model(cfg_dict, plot=False):
         try:
             plotter = pvar()
             plotter.plot_variables(model_heat, model_cool, period='year')
-        except Exception:
-            pass
+        except Exception as e:
+            import traceback
+            print("Plotting failed: ", str(e))
+            traceback.print_exc()
 
     return {"times": model_heat.times, "heating": heating_load, "cooling": cooling_load, "elapsed_s": elapsed}
 
@@ -57,9 +59,9 @@ def main():
     # p1.join()
     # p2.join()
 
-    print(f"Heating load total: {res["heating"].sum()}")
+    print(f"Heating load total: {res['heating'].sum()}")
 
-    print(f"Cooling load total: {res["cooling"].sum()}")
+    print(f"Cooling load total: {res['cooling'].sum()}")
 
     # Combine results for plotting, using one model as base
     # model_heat.cooling_load = cooling_load
@@ -72,7 +74,7 @@ def main():
     # print("Detailed Results:")
     # print(model_heat.detailedResults)
 
-    print("Execution Time:", f"{res["elapsed_s"]:.2f}", "seconds")
+    print(f"Execution Time: {res['elapsed_s']:.2f} seconds")
 
 
 if __name__=="__main__":

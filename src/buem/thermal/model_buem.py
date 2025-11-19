@@ -1,17 +1,21 @@
-import logging
 import pvlib
-
 import cvxpy as cp
-
 from scipy.sparse.linalg import spsolve
 from scipy.sparse import lil_matrix, vstack
-
 import pandas as pd
 import numpy as np
 
-
-
 class ModelBUEM(object):
+    """
+    Parameterized ISO-13790 5R1C building model.
+    
+    Key aspects:
+    - Use of the following input modules: Occupancy, weather, and 3D-building + Tabula
+    - Output: Heating and cooling load at a building level with hourly resolution
+    - Consideration of pvlib python package for calculating solar gains
+    - Following building components' consideration: walls, roofs, windows, doors, and floor
+    - solve with scipy (equality) or cvxpy (inequalities)
+    """
     CONST = {
         # Constants for calculation of A_m, dependent of building class
         # (DIN EN ISO 13790, section 12.3.1.2, page 81, table 12)
@@ -27,7 +31,7 @@ class ModelBUEM(object):
         # (DIN EN ISO 13790, section 12.2.2, page 79)
         "h_ms": 9.1 / 1000,
         # ISO 6946 Table 1, Heat transfer resistances for opaque components
-        "R_se": 0.04 * 1000,  # external heat transfer coefficient m²K/W
+        "R_se": 0.04 * 1000,  # external heat transfer coefficient m²K/kW
         # ASHRAE 140 : 2011, Table 5.3, page 18 (infrared emittance) (unused --> look at h_r)
         "epsilon": 0.9,
         # external specific radiative heat transfer [kW/m^2/K] (ISO 13790, Schuetz et al. 2017, 2.3.4)
@@ -42,557 +46,389 @@ class ModelBUEM(object):
         "C_air": 1.006,  # kJ/kg/K
         }
 
-    def __init__(self, cfg, maxLoad = None):
+    def __init__(self, cfg: dict, maxLoad: float = None):
         """
+        Initialize model instance and declare cross-method attributes.
 
-        maxLoad: float, optional (default: DesignHeatLoad)
+        Parameters
+        ----------
+        cfg: dict
+            Configuration / attributes 
+            (expected keys: 'weather', 'building_components', etc.)
+        maxLoad: float, optional 
+            (default: DesignHeatLoad)
             Maximal load of the heating system.
 
         """
         self.cfg = cfg 
-        self.ventControl = False
-
         self.maxLoad = maxLoad
 
+        # time series index
         self.times = self.cfg["weather"].index
 
-        # initialize dataframe for irradiance on all surface directions
-        self._irrad_surf = pd.DataFrame(index=cfg["weather"].index)
+        # irradiance per surface element (DataFrame indexed by time, cols = element ids)
+        self._irrad_surf = pd.DataFrame(index=self.times)
 
+        # component tree and per-component parameters
+        # component_elements: dict[component] -> list[element dicts {id, area, azimuth, tilt, ...}]
+        self.component_elements = {}
+        # component-level U (same for all elements)
+        self.bU = {}
+        # component conductance [kW/K] aggregated over elements (Original state)
+        self.bH = {}
+        # window element list (shortcut)
+        self.windows = []
 
-        # initialize result dictionary and dataframes
+        # 5R1C thermal parameters (initialized later in _init5R1C)
+        self.bA_f = None
+        self.bA_m = None
+        self.bH_ms = None
+        self.bC_m = None
+        self.bA_tot = None
+        self.bH_is = None
+        self.bT_comf_lb = None
+        self.bT_comf_ub = None
+
+        # profiles (internal gains, occupancy, solar gains created in _init5R1C)
+        self.profiles = {}
+        self.profilesEval = {}
+
+        # results containers
         self.static_results = {}
         self.detailedResults = pd.DataFrame(index=self.times)
-        self.detailedRefurbish = pd.DataFrame()
 
-
-        # storage for orignal U-values for scaling of the heat demand
-        self._orig_U_Values={}
-
-        # Dynamically building components and subcomponents lists from cfg
+        # solver/runtime bookkeeping
         self.components = ["Walls", "Roof", "Floor", "Windows", "Ventilation"]
-        self.walls = [k.replace('U_', '') for k in cfg if k.startswith('U_Wall')]
-        self.roofs = [k.replace('U_', '') for k in cfg if k.startswith('U_Roof')]
-        self.floors = [k.replace('U_', '') for k in cfg if k.startswith('U_Floor')]
-        self.windows = [k.replace('U_', '') for k in cfg if k.startswith('U_Window')]
-        self.ventilations = [k.replace('U_', '') for k in cfg if k.startswith('U_Ventilation')]
+        self.hasTypPeriods = False
+        self.ventControl = bool(self.cfg.get("ventControl", False))
 
-        # for each component, which refurbishment is chosen
-        self.bInsul = {}
-        # specific heat transfer coefficients for each component for each refurbishment decision
-        self.bH = {comp: {} for comp in self.components}
-        # specific u values for each component for each refurbishment decision
-        self.U = {}
-
-        # raw insulation/refurbishment data
-        self.refRaw = {}
-
-        # define refurbishment/extract refurbishment boolean from cfg
-        self.bRefurbishment = self.cfg["refurbishment"]
-
-        return
-    
+    # -------- utilities --------
+    def _cfg_float(self, key, default=0.0):
+        """Consistent float read helper for cfg values (handles Series fallback)."""
+        v = self.cfg.get(key, default)
+        try:
+            return float(v)
+        except Exception:
+            # allow Series/array -> take mean as fallback if provided
+            try:
+                return float(np.mean(v))
+            except Exception:
+                return float(default)
+            
+    # -------- parameter parsing --------
     def _initPara(self):
         """
-        Initilizes all required list and dicts for indices and params of 
-        building model for optmization
+        Ensure required dictionaries/lists are present before building parameters.
         """
-        # get profiles dict for all considered time series
         if not hasattr(self, "profiles"):
             self.profiles = {}
         if not hasattr(self, "profilesEval"):
             self.profilesEval = {}
-        if not hasattr(self, "exVarIx"):
-            self.exVarIx = []
-        if not hasattr(self, "exVarActive"):
-            self.exVarActive = []
-        if not hasattr(self, "exVarInActive"):
-            self.exVarInActive = []
-        if not hasattr(self, "insulIx"):
-            self.insulIx = []
-        return
 
     def _initEnvelop(self):
         """
-        Parameterize heat flow for different refurbishment options using numeric values.
-        
-        keys
-        ----------
-        components configuration keys required for parameterization and refurbishment decisions:
-        - example: Walls: 'U_Wall_1', 'U_Wall_2', ...
+        Parse cfg['components'] or fallback legacy keys.
+        - Populate self.component_elements: component -> list of {id, area, azimuth, tilt, ...}
+        - Populate component-level U in self.bU
+        - Compute aggregated conductance self.bH[component]['Original'] = U * sum(area) * b_trans / 1000 (kW/K)
+        - Compute ventilation conductance and include under 'Ventilation'
         """
+        comps = self.cfg.get("components")
+        if isinstance(comps, dict) and comps:
+            # structured component tree provided
+            for comp_name, comp_data in comps.items():
+                elems = comp_data.get("elements", [])
+                parsed = []
+                for e in elems:
+                    parsed.append(
+                        {
+                            "id": e.get("id"),
+                            "area": float(e.get("area", 0.0)),
+                            "azimuth": float(e["azimuth"]) if e.get("azimuth") is not None else None,
+                            "tilt": float(e["tilt"]) if e.get("tilt") is not None else None,
+                            # preserve other properties (e.g., surface mapping for windows)
+                            **{k: v for k, v in e.items() if k not in ("id", "area", "azimuth", "tilt")}
+                        }
+                    )
+                self.component_elements[comp_name] = parsed
 
-        for comp in self.components:
-            df = pd.read_excel(self.cfg['costdatapath'], sheet_name=comp, skiprows=[1], index_col=0)
-            df = df.dropna(how="all")
-            self.refRaw[comp] = df
-
-            if self.bRefurbishment:
-                if self.cfg["force_refurbishment"]:
-                    self.bInsul[comp] = df.index.unique()[1:]
-                else:
-                    self.bInsul[comp] = df.index.unique()
-                for dec in self.bInsul[comp]:
-                    self.exVarIx.append((comp, dec))
-                    self.insulIx.append((comp, dec))
-            else:
-                ix = df.index.unique()[0]
-                self.bInsul[comp] = [ix]
-                self.exVarIx.append((comp, ix))
-                self.insulIx.append((comp, ix))
-
-        # OPAQUE COMPONENTS
-        for comp, sublist in zip(["Walls", "Roof", "Floor"], [self.walls, self.roofs, self.floors]):
-            df = self.refRaw[comp]
-            # Calculate U-values for each refurbishment option (vectorized)
-            df["U_Value"] = df["Lambda"] / df["Thickness"]
-            df["U_Value"] = df["U_Value"].replace([np.inf, -np.inf], 0.0).fillna(0.0)
-
-
-            # Calculate bH for each refurbishment option
-            for option in self.bInsul[comp]:
-                bH = 0.0
-                for sub in sublist:
-                    U_vals_insul = df.loc[option, "U_Value"]
-                    # Handle both scalar and array cases
-                    if np.isscalar(U_vals_insul):
-                        U_list = [U_vals_insul, self.cfg["U_" + sub]]
-                    else:
-                        U_list = list(U_vals_insul.values) + [self.cfg["U_" + sub]]
-
-                    U_val = self._calcUVal(U_list)
-                    bH += U_val * self.cfg["A_" + sub] * self.cfg["b_Transmission_" + sub] / 1000
-                self.bH[comp][option] = bH
-
-
-        # WINDOWS
-        # Add original windows if not present
-        df_windows = self.refRaw["Windows"]
-        self.g_gl = {}
-        self.bH["Windows"] = {}
-        self.bU = {"Windows": {}}        
-        
-        if "Nothing" not in df_windows.index:
-            df_windows.loc["Nothing", "g_gl"] = self.cfg["g_gl_n_Window"]
-            df_windows.loc["Nothing", "U_Value"] = self.cfg["U_Window"]
-        
+                # component U
+                self.bU[comp_name] = float(comp_data.get("U", self.cfg.get(f"U_{comp_name}", 0.0)))
+                
+                # transmission factor (optional)
+                b_trans = float(comp_data.get("b_transmission", comp_data.get("b_transmission", 1.0)))
+                total_area = sum(e["area"] for e in parsed)
+                self.bH[comp_name] = {"Original": self.bU[comp_name] * total_area * b_trans / 1000.0}
         else:
-            # Fill missing values if present
-            if pd.isna(df_windows.loc["Nothing", "g_gl"]):
-                df_windows.loc["Nothing", "g_gl"] = self.cfg.get("g_gl_n_Window", 0.5)
-            if pd.isna(df_windows.loc["Nothing", "U_Value"]):
-                df_windows.loc["Nothing", "U_Value"] = self.cfg.get("U_Window", 1.1)        
+            # legacy flat config: build minimal component_elements for compatibility
+            # Walls, Roof, Floor based on A_* and U_* keys
+            for comp in ["Walls", "Roof", "Floor", "Windows", "Ventilation"]:
+                elems = []
+                # search for keys A_<Comp>_n or A_<Comp> keys
+                # Try A_<Comp>_1, A_<Comp>_2 pattern
+                i = 1
+                found = False
+                while True:
+                    key = f"A_{comp}_{i}"
+                    if key in self.cfg:
+                        found = True
+                        elems.append({"id": f"{comp}_{i}", "area": float(self.cfg.get(key, 100.0))})
+                        i += 1
+                    else:
+                        break
+                if not found and f"A_{comp}" in self.cfg:
+                    elems.append({"id": f"{comp}_1", "area": float(self.cfg.get(key, 100.0))})
+                self.component_elements[comp] = elems
+                # component-level U fallback
+                self.bU[comp] = float(self.cfg.get(f"U_{comp}"))
+                total_area = sum(e["area"] for e in elems)
+                b_trans = float(self.cfg.get(f"b_Transmission_{comp}_1", 1.0))
+                self.bH[comp] = {"Original": self.bU[comp] * total_area * b_trans / 1000.0}
 
-        for option in self.bInsul["Windows"]:
-            U_val = float(df_windows.loc[option, "U_Value"])
-            self.bH["Windows"][option] = self.cfg["A_Window"] * U_val / 1000
-            self.bU["Windows"][option] = U_val / 1000
-            self.g_gl[option] = float(df_windows.loc[option, "g_gl"])
+        # build helper lists and windows element list
+        self.walls = [e["id"] for e in self.component_elements.get("Walls", [])]
+        self.roofs = [e["id"] for e in self.component_elements.get("Roof", [])]
+        self.floors = [e["id"] for e in self.component_elements.get("Floor", [])]
+        self.windows = self.component_elements.get("Windows", [])
 
-        # VENTILATION
-        df_ventilation = self.refRaw["Ventilation"]
-        self.bH["Ventilation"] = {}
-        C_air = (
-            self.cfg["A_ref"]
-            *self.cfg["h_room"]
-            *self.CONST["rho_air"]
-            *self.CONST["C_air"]
-        )
-        for option in self.bInsul["Ventilation"]:
-            # ventilation heat flow corrected by the recovery rate for usable air
-            recovery = float(df_ventilation.loc[option, "Recovery rate"])
-            self.bH["Ventilation"][option] = (
-                C_air
-                * (
-                    self.cfg["n_air_use"]
-                    * (1 - recovery)
-                    + self.cfg["n_air_infiltration"]
-                )
-                / 3600            
-                ) #kW/K
 
-    @staticmethod
-    def _calcUVal(U_list):
-        U_list = [u for u in U_list if u > 0]
-        if not U_list:
-            return 0.0
-        return 1.0 / sum(1.0 / u for u in U_list)
+        # ventilation aggregated conductance (kW/K)
+        A_ref = self._cfg_float("A_ref", 1.0)
+        h_room = self._cfg_float("h_room", 2.5)
+        rho_air = self.CONST["rho_air"]
+        C_air = self.CONST["C_air"]
+        n_air_inf = self._cfg_float("n_air_infiltration", 0.0)
+        n_air_use = self._cfg_float("n_air_use", 0.0)
+        H_ve = A_ref * h_room * rho_air * C_air * (n_air_inf + n_air_use) / 3600.0
+        self.bH.setdefault("Ventilation", {})["Original"] = H_ve
 
+    # -------- 5R1C & solar --------        
     def _init5R1C(self):
         """
-        Initialize all required parameters required for the 5R1C model (DIN EN ISO 13790). 
+        Compute 5R1C thermal parameters and build solar gain profiles.
+        - Thermal capacity: uses cfg['thermalClass'] to derive c_m and A_m per ISO/DIN table.
+        - Compute POA irradiance per element from self.component_elements (via pvlib).
+        - Build and store time series in self.profiles:
+            bQ_sol_Windows, bQ_sol_Walls, bQ_sol_Roof, bQ_sol_Opaque
         """
-        # Constants
+        # store constants reference
         self.bConst = self.CONST
 
-        # Thermal capacity class definition of the building --> also algebraic
-        # variant possible
-        bClass_f_lb = {
-            "very light": 0.0,
-            "light": 95.0,
-            "medium": 137.5,
-            "heavy": 212.5,
-            "very heavy": 313.5,
-        }
-        bClass_f_ub = {
-            "very light": 95.0,
-            "light": 137.5,
-            "medium": 212.5,
-            "heavy": 313.5,
-            "very heavy": 313.5 * 2,
-        }
-        bClass_f_a = {
-            "very light": 2.5,
-            "light": 2.5,
-            "medium": 2.5,
-            "heavy": 3.0,
-            "very heavy": 3.5,
-        }
+        # thermal capacity classes (DIN/ISO values)
+        bClass_f_lb = {"very light": 0.0, "light": 95.0, "medium": 137.5, "heavy": 212.5, "very heavy": 313.5}
+        bClass_f_ub = {"very light": 95.0, "light": 137.5, "medium": 212.5, "heavy": 313.5, "very heavy": 627.0}
+        bClass_f_a = {"very light": 2.5, "light": 2.5, "medium": 2.5, "heavy": 3.0, "very heavy": 3.5}
 
-        # heated floor area
-        self.bA_f = self.cfg["A_ref"]
 
-        # calculate effective heat transfer of heat capacity
-        self.bA_m = self.bA_f * bClass_f_a[self.cfg["thermalClass"]]
-        # effective transfer coefficient [kW/K]
-        self.bH_ms = self.bA_m * self.bConst["h_ms"] # Eq. 7 Schuetz et al. 2017 
+        # Heated floor area and basic derived thermal params
+        self.bA_f = float(self.cfg.get("A_ref", 100.0))
+        thermalClass = self.cfg.get("thermalClass", "medium")
+        self.bA_m = self.bA_f * bClass_f_a.get(thermalClass, 2.5)
+        self.bH_ms = self.bA_m * self.bConst["h_ms"]
 
-        # specific heat [kJ/m^2/K] (Note: The standard value is overwritten!)
-        self.cfg["c_m"] = (
-            bClass_f_lb[self.cfg["thermalClass"]]
-            + bClass_f_ub[self.cfg["thermalClass"]]
-        ) / 2.0
-        # internal heat capacity [kWh/K]
-        self.bC_m = self.cfg["A_ref"] * self.cfg["c_m"] / 3600.0
+        # specific heat c_m (kJ/m2/K) -> internal heat capacity [kWh/K]
+        if "c_m" not in self.cfg:
+            self.cfg["c_m"] = (bClass_f_lb.get(thermalClass, 137.5) + bClass_f_ub.get(thermalClass, 137.5)) / 2.0
+        self.bC_m = self.bA_f * float(self.cfg["c_m"]) / 3600.0
 
-        # through door [kW/K]
-        self.bH_door = (self.cfg["A_Door_1"] * self.cfg["U_Door_1"]) / 1000
-
-        # internal surface area
-        self.bA_tot = self.cfg["A_ref"] * self.bConst["lambda_at"]
-        # heat transfer between surface and air node [kW/k] (Schuetz et al. 2017 - eq. 11)
+        # internal surface area and surface-air conductance
+        self.bA_tot = self.bA_f * self.bConst["lambda_at"]
         self.bH_is = self.bA_tot * self.bConst["h_is"]
 
-        # comfort temperature
-        self.bT_comf_lb = self.cfg["comfortT_lb"]
-        self.bT_comf_ub = self.cfg["comfortT_ub"]
+        # comfort bounds
+        self.bT_comf_lb = float(self.cfg.get("comfortT_lb", 21.0))
+        self.bT_comf_ub = float(self.cfg.get("comfortT_ub", 24.0))
 
-        # shorten code
-        #rt = self.cfg["roofTilt"]
-        #ro = self.cfg["roofOrientation"]
+        # Build surface azimuth/tilt dicts from component elements (element ids as keys)
+        surf_az = {}
+        surf_tilt = {}
+        for comp, elems in self.component_elements.items():
+            for e in elems:
+                eid = e.get("id")
+                if eid is None:
+                    continue
+                if e.get("azimuth") is not None:
+                    surf_az[eid] = float(e["azimuth"])
+                if e.get("tilt") is not None:
+                    surf_tilt[eid] = float(e["tilt"])
 
-        ## set relevant geometrical data
-        #surf_az = {
-        #    "North": 0.0 + ro,
-        #    "East": 90.0 + ro,
-        #    "South": 180.0 + ro,
-        #    "West": 270.0 + ro,
-        #    "Horizontal": 180.0,
-        #    "Roof 1": 90.0 + ro,
-        #    "Roof 2": 270.0 + ro,
-        #}
-        #surf_tilt = {
-        #    "North": 90.0,
-        #    "East": 90.0,
-        #    "South": 90.0,
-        #    "West": 90.0,
-        #    "Horizontal": 0.0,
-        #    "Roof 1": rt,
-        #    "Roof 2": rt,
-        #}
-        #changed by myj
-        # Geometry for solar radiation calculation
-        surf_az = {
-            "North": 0.0,
-            "East": 90.0,
-            "South": 180.0,
-            "West": 270.0,
-            "Horizontal": 180.0,
-        }
-        surf_tilt = {
-            "North": 90.0,
-            "East": 90.0,
-            "South": 90.0,
-            "West": 90.0,
-            "Horizontal": 0.0,
-        }
-        for i, roof in enumerate(self.cfg['roofs'], 1):
-            surf_az[f'Roof {i}'] = roof['roofOrientation']
-            surf_tilt[f'Roof {i}'] = roof['roofTilt']
-    
-        F_r = {"North": 0.5, "East": 0.5, "South": 0.5, "West": 0.5, "Horizontal": 1.0}
+        # Fallback defaults (cardinal + horizontal) surfaces if not provided
+        defaults_az = {"North": 0.0, "East": 90.0, "South": 180.0, "West": 270.0, "Horizontal": 180.0}
+        defaults_tilt = {"North": 90.0, "East": 90.0, "South": 90.0, "West": 90.0, "Horizontal": 0.0}
+        for k, v in defaults_az.items():
+            surf_az.setdefault(k, v)
+        for k, v in defaults_tilt.items():
+            surf_tilt.setdefault(k, v)
 
+        # compute POA irradiance per element (populates self._irrad_surf in kW/m2)
         self._calcRadiation(surf_az, surf_tilt)
 
-        # solar radiation dict [kW]
-        self.bQ_sol = {}
+        # Build solar gain profiles (kW time series arrays)
+        # WINDOWS: each window element may reference a surface (surface field) or be its own surface
+        self.g_gl = float(self.cfg.get("g_gl_n_Window", 0.5))
+        self.F_sh_vert = float(self.cfg.get("F_sh_vert", 1.0))
+        self.F_sh_hor = float(self.cfg.get("F_sh_hor", 1.0))
+        self.F_w = float(self.cfg.get("F_w", 1.0))
+        self.F_f = float(self.cfg.get("F_f", 0.0))
 
-        # WINDOWS
-        # get relevant window area for solar irradiance
-        window_area_s = {
-            di: self.cfg["A_Window_" + di] * self.cfg["F_sh_vert"]
-            for di in ["North", "East", "South", "West"]
-        }
-        window_area_s["Horizontal"] = (
-            self.cfg["A_Window_Horizontal"] * self.cfg["F_sh_hor"]
+        # windows total profile
+        window_profiles = []
+        for w in self.windows:
+            wid = w["id"]
+            area = float(w.get("area", 10.0))
+            # window may reference a parent surface (e.g., "surface": "Wall_1")
+            surf_ref = w.get("surface", wid)
+            if surf_ref in self._irrad_surf.columns:
+                irr = self._irrad_surf[surf_ref].values  # kW/m2
+            else:
+                # fallback to GHI (kW/m2)
+                irr = self.cfg["weather"]["GHI"].values / 1000.0
+            # Q [kW] = area * g_gl * irr * fraction factors - small thermal sky term handled below
+            window_profiles.append(area * self.g_gl * (1.0 - self.F_f) * self.F_w * irr)
+
+        if window_profiles:
+            self.profiles["bQ_sol_Windows"] = np.sum(np.vstack(window_profiles), axis=0)
+        else:
+            self.profiles["bQ_sol_Windows"] = np.zeros(len(self.times))
+
+        # thermal sky loss (approx) for windows using component bU and window-area-weighted factor
+        total_window_area = sum(float(w.get("area", 0.0)) for w in self.windows)
+        U_win = self.bU.get("Windows", float(self.cfg.get("U_Window", 0.0)))
+        thermal_rad_win = (
+            total_window_area
+            * self.bConst["h_r"]
+            * (U_win)
+            * self.bConst["R_se"]
+            * self.bConst["delta_T_sky"]
         )
+        # subtract constant thermal_rad per time-step (convert to kW) — keep as scalar array
+        self.profiles["bQ_sol_Windows"] = self.profiles["bQ_sol_Windows"] - thermal_rad_win
 
-        # get relevant window area for thermal irradiance
-        window_area_t = sum(self.cfg["A_Window_" + key] * F_r[key] for key in F_r)
+        # OPAQUE (Walls, Roof, Floor) : compute mean/aggregate irradiance per component and convert to Q [kW]
+        # alpha (absorptance) used for opaque solar gains
+        alpha = self.CONST["alpha"]
         
-        # total_solar_gain=0
-        # get solar radiation on window area
-        irrad_on_windows = (
-            self._irrad_surf.mul(pd.Series(window_area_s)).sum(axis=1).values
+        # Walls (use element-wise irradiance)
+        wall_profiles = []
+        for e in self.component_elements.get("Walls", []):
+            eid = e["id"]
+            area = float(e.get("area", 0.0))
+            # use element POA if available, otherwise GHI
+            irr = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
+            wall_profiles.append(area * alpha * self.F_sh_vert * irr)
+            self.profiles["bQ_sol_Walls"] = np.sum(np.vstack(wall_profiles), axis=0) if wall_profiles else np.zeros(len(self.times))
+
+        # Roofs
+        roof_profiles = []
+        for e in self.component_elements.get("Roof", []):
+            eid = e["id"]
+            area = float(e.get("area", 50.0))
+            irr = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
+            roof_profiles.append(area * alpha * self.F_sh_hor * irr)
+        self.profiles["bQ_sol_Roof"] = np.sum(np.vstack(roof_profiles), axis=0) if roof_profiles else np.zeros(len(self.times))
+
+        # Floors (usually negligible solar)
+        self.profiles["bQ_sol_Floor"] = np.zeros(len(self.times))
+
+        # Combine opaque solar (walls+roof+floor)
+        self.profiles["bQ_sol_Opaque"] = (
+            self.profiles["bQ_sol_Walls"] + self.profiles["bQ_sol_Roof"] + self.profiles["bQ_sol_Floor"]
         )
 
-        # solar gain time series depending on the investment decision
-        for option in self.bInsul["Windows"]:
-            # thermal radiation [kW] (Schuetz et al. 2017 - eq. 13)
-            thermal_rad = (
-                window_area_t
-                * self.bConst["h_r"]
-                * self.bU["Windows"][option]
-                * self.bConst["R_se"]
-                * self.bConst["delta_T_sky"]
-            )
-            self.profiles["bQ_sol_Windows" + option] = (
-                irrad_on_windows
-                * (1.0 - self.cfg["F_f"])
-                * self.cfg["F_w"]
-                * self.g_gl[option]
-                - thermal_rad
-            )
-            # total_solar_gain +=self.profiles["bQ_sol_Windows"+var].sum()#myj
-
-        # WALLS
-        mean_ver_irr = (
-            self._irrad_surf.loc[:, ["North", "East", "South", "West"]]
-            .mean(axis=1)
-            .values
-        )
-        for option in self.bInsul["Walls"]:
-            # thermal radiation [kW] (Schuetz et al. 2017 - eq. 13)
-            thermal_rad = (
-                self.bH["Walls"][option]
-                * self.bConst["h_r"]
-                * self.bConst["R_se"]
-                * self.bConst["delta_T_sky"]
-            )
-            solar_radiation = (
-                mean_ver_irr
-                * self.bH["Walls"][option]
-                * self.cfg["F_sh_vert"]
-                * self.bConst["R_se"]
-                * self.bConst["alpha"]
-            )
-            self.profiles["bQ_sol_Walls" + option] = solar_radiation - thermal_rad
-            # total_solar_gain += self.profiles["bQ_sol_Walls" + var].sum()
-
-        # ROOF
-        mean_roof_irr = self._irrad_surf[[f'Roof {i}' for i in range(1, len(self.cfg['roofs'])+1)]].mean(axis=1).values #changed by myj
-        #mean_roof_irr = self._irrad_surf.loc[:, ["Roof 1", "Roof 2"]].mean(axis=1).values
-        for option in self.bInsul["Roof"]:
-            # thermal radiation (Schuetz et al. 2017 - eq. 13)
-            thermal_rad = (
-                self.bH["Roof"][option]
-                * self.bConst["h_r"]
-                * self.bConst["R_se"]
-                * self.bConst["delta_T_sky"]
-            )
-            solar_radiation = (
-                mean_roof_irr
-                * self.bH["Roof"][option]
-                * self.cfg["F_sh_hor"]
-                * self.bConst["R_se"]
-                * self.bConst["alpha"]
-            )
-            self.profiles["bQ_sol_Roof" + option] = solar_radiation - thermal_rad
-            # total_solar_gain += self.profiles["bQ_sol_Roof" + var].sum()
-        return
-
-    def _calcRadiation(self, surf_az, surf_tilt):
+    def _calcRadiation(self, surf_az:dict, surf_tilt:dict):
         """
-        Calculates the radiation to all considered walls and roofs.
+        Compute plane-of-array (POA) irradiance for each surface element via pvlib.
+        Results assigned to self._irrad_surf[col = element id] in kW/m2.
         """
         # init required time series
         SOL_POS = pvlib.solarposition.get_solarposition(
-            self.cfg["weather"].index, self.cfg["latitude"], self.cfg["longitude"]
+            self.cfg["weather"].index, self.cfg.get("latitude", 52.0), self.cfg.get("longitude", 5.0)
         )
         AM = pvlib.atmosphere.get_relative_airmass(SOL_POS["apparent_zenith"])
-        DNI_ET = pvlib.irradiance.get_extra_radiation(self.cfg["weather"].index.dayofyear)
+        dni_extra = pvlib.irradiance.get_extra_radiation(self.cfg["weather"].index.dayofyear)
 
         for key in surf_az:
+            tilt = surf_tilt.get(key, 0.0)
+            az = surf_az[key]
             # calculate total irradiance depending on surface tilt and azimuth
             total = pvlib.irradiance.get_total_irradiance(
-                surf_tilt[key],
-                surf_az[key],
-                SOL_POS["apparent_zenith"],
-                SOL_POS["azimuth"],
+                surface_tilt=tilt,
+                surface_azimuth=az,
+                solar_zenith=SOL_POS["apparent_zenith"],
+                solar_azimuth=SOL_POS["azimuth"],
                 dni=self.cfg["weather"]["DNI"],
                 ghi=self.cfg["weather"]["GHI"],
                 dhi=self.cfg["weather"]["DHI"],
-                dni_extra=DNI_ET,
+                dni_extra=dni_extra,
                 airmass=AM,
                 model="perez",
                 surface_type="urban",
             )
-            # get plane of array (POA) irradiance and replace nan
+            # store global plane of array (POA) irradiance and replace nan
             self._irrad_surf[key] = total["poa_global"].fillna(0)
 
-        # W to kW
-        self._irrad_surf = self._irrad_surf / 1000
-        return   
+        # W/m2 to kW/m2
+        self._irrad_surf = self._irrad_surf / 1000 
 
-    def calcDesignHeatLoad(self, symbolic=False):
+    # -------- design load --------
+    def calcDesignHeatLoad(self) -> float:
         """
-        Calculates the design heat load which is needed to satisfy the
-        nominal outdoor temperature.
-        If symbolic is True, returns a sympy expression, instead of numeric values.
-        
-        Returns
-        -------
-        designHeatLoad [kW]
+        Approximate design heat load [kW]. Uses aggregated conductances (self.bH).
         """
-        b = self.cfg
-        designHeatLoad = (
-            b["A_Roof_1"] * b["U_Roof_1"] * b["b_Transmission_Roof_1"]
-            + b["A_Roof_2"] * b["U_Roof_2"] * b["b_Transmission_Roof_2"]
-            + b["A_Wall_1"] * b["U_Wall_1"] * b["b_Transmission_Wall_1"]
-            + b["A_Wall_2"] * b["U_Wall_2"] * b["b_Transmission_Wall_2"]
-            + b["A_Wall_3"] * b["U_Wall_3"] * b["b_Transmission_Wall_3"]
-            + b["A_Window"] * b["U_Window"]
-            + b["A_Door_1"] * b["U_Door_1"]
-            + (
-                b["A_ref"]
-                * b["h_room"]
-                * 1.2
-                * 1006
-                * (b["n_air_infiltration"] + b["n_air_use"])
-                / 3600
-            )
-        ) * (22.917 - self.cfg["design_T_min"]) + (
-            (
-                b["A_Floor_1"] * b["U_Floor_1"] * b["b_Transmission_Floor_1"]
-                + b["A_Floor_2"] * b["U_Floor_2"] * b["b_Transmission_Floor_2"]
-            )
-            * (22.917 - self.cfg["design_T_min"])
-            * 1.45
-        )
-        return designHeatLoad / 1000  
+        # ensure envelope parsed
+        if not self.bH:
+            self._initEnvelop()
+        H_tot = sum(self.bH.get(c, {}).get("Original", 0.0) for c in self.bH)
+        deltaT = 22.917 - float(self.cfg.get("design_T_min", 0.0))
+        return H_tot * deltaT
 
     def _addPara(self):
         """
-        Add indices and parameters of the building to the parameterization model.
+        Prepare additional parameters and subsets required for optimization/simulation.
+        Calls _initEnvelop and _init5R1C to ensure derived profiles and bH are available.
         """
 
         self._initPara()
-
-        if hasattr(self, "bMaxLoad"):
-            raise NotImplementedError(
-                "At the moment only single building"
-                + " initialization for enercore network"
-                + " possible."
-            )
-
-        # limit maximal heat or cooling load
-        if self.maxLoad is None:
-            designLoad = self.calcDesignHeatLoad()
-            self.bMaxLoad = designLoad
-            self.maxLoad = designLoad
-        else:
-            self.bMaxLoad = self.maxLoad
-        # define refurbishment
-        self.bRefurbishment = self.cfg["refurbishment"]
-
-        # get all envelop values
         self._initEnvelop()
-
-        # get all radiation values
         self._init5R1C()
 
-        # get occupancy data and internal heat gains and electricity load
-        # evaluate all profiles with 0 in case of time series aggregation
-        self.profiles["bQ_ig"] = self.cfg["Q_ig"]
-        self.profiles["bOccNotHome"] = self.cfg["occ_nothome"].values
-        self.profiles["bOccSleeping"] = self.cfg["occ_sleeping"].values
-        self.profiles["bElecLoad"] = self.cfg["elecLoad"].values
-        self.profilesEval["bElecLoad"] = 1.0
-        #M.profiles["HeatingLoad"] = self.calcDesignHeatLoad()
-        
-        # environment temperature
-        self.profiles["T_e"] = self.cfg["weather"]["T"].values
-        self.profilesEval["T_e"] = 1.0
-        #print(M.profiles["HeatingLoad"])
-        
-        # subsets
-        self.bX_opaque = []
-        for comp in ["Walls", "Roof", "Floor"]:
-            for dec in self.bInsul[comp]:
-                self.bX_opaque.append((comp, dec))
-        self.bX_windows = []
-        for comp in ["Windows"]:
-            for dec in self.bInsul[comp]:
-                self.bX_windows.append((comp, dec))
-        self.bX_vent = []
-        for comp in ["Ventilation"]:
-            for dec in self.bInsul[comp]:
-                self.bX_vent.append((comp, dec))
-        self.bX_solar = []
-        for comp in ["Windows", "Walls", "Roof"]:
-            for dec in self.bInsul[comp]:
-                self.bX_solar.append((comp, dec))
- 
-        # activate or deactivate ventilation control
-        if self.cfg["ventControl"]:
-            logging.warning("Ventilation control is not validated")
-            self.bVentControl = True
+        # sizing
+        if self.maxLoad is None:
+            self.BMaxLoad = self.calcDesignHeatLoad()
+            self.maxLoad = self.bMaxLoad
         else:
-            self.bVentControl = False
+            self.bMaxLoad = self.maxLoad
 
-        # calculate big M and small m representing max and min heat flow
+
+
+        # Prepare basic profiles references for other code paths
+        self.profiles["bQ_ig"] = self.cfg.get("Q_ig", pd.Series(0.0, index=self.times))
+        self.profiles["occ_nothome"] = self.cfg.get("occ_nothome", pd.Series(0.0, index=self.times))
+        self.profiles["occ_sleeping"] = self.cfg.get("occ_sleeping", pd.Series(0.0, index=self.times))
+ 
+        # compute big-M bounds for aggregated heat flows (for compatibility)
         self.bM_q = {}
         self.bm_q = {}
-        for comp in self.bInsul:
+        for comp, d in self.bH.items():
             self.bM_q[comp] = {}
             self.bm_q[comp] = {}
-            for dec in self.bInsul[comp]:
-                self.bM_q[comp][dec] = self.bH[comp][dec] * (
-                    self.bT_comf_ub - (self.cfg["weather"]["T"].min() - 10)
-                )
-                self.bm_q[comp][dec] = self.bH[comp][dec] * (
-                    self.bT_comf_lb - (self.cfg["weather"]["T"].max() + 10)
-                )
-
-            # test the values of bM_q and bm_q for NaN values
-            for comp in self.bM_q:
-                for dec in self.bM_q[comp]:
-                    if np.isnan(self.bM_q[comp][dec]):
-                        print(f"NaN in bM_q[{comp}][{dec}]")
-                    if np.isnan(self.bm_q[comp][dec]):
-                        print(f"NaN in bm_q[{comp}][{dec}]")
-        
-        # define design temperature
-        self.bT_des = self.cfg["design_T_min"]       
-        
-        return 
+            for state, H_val in d.items():
+                # conservative bounds based on comfort temps and weather extremes
+                high = (self.bT_comf_ub - (self.cfg["weather"]["T"].min() - 10)) * H_val
+                low = (self.bT_comf_lb - (self.cfg["weather"]["T"].max() + 10)) * H_val
+                self.bM_q[comp][state] = high
+                self.bm_q[comp][state] = low
 
     def _addVariables(self):   
         """
-        Static method to add dimensioning variables to the parameterization
+        Declare placeholders for variable containers used by other methods.
+        This method does not create solver variables; it sets up dicts/lists only.
         """
-        # Refurbishment decision variables (binary or continuous)
-        self.exVars = {}   # Decision variables for each component and refurbishment decision
+
         self.bQ_comp = {}  # Heat flow through components 
 
         # define/declare auxiliary variable for modeling heat flow on thermal mass surface
         self.bP_X = {}
-
-        if self.hasTypPeriods: #example: 365 days, 24 steps per day
-            num_periods = 365  # or set dynamically
-            steps_per_period = 24  # or set dynamically
-            self.typPeriodIx = range(num_periods)
-            self.intraIx = range(steps_per_period)
 
         # temperatures variables
         self.bT_m = {}  # thermal mass node temperature
@@ -605,56 +441,31 @@ class ModelBUEM(object):
         self.bQ_st = {}  # heat flow to surface node [kW]
 
         # ventilation heat flow
-        self.bQ_ve = {}  # heat flow through ventilation [kW]
-
-        # external heat losses including heat exchange
-        self.bQ_comp = {}  
-
-        return            
+        self.bQ_ve = {}  # heat flow through ventilation [kW]         
                                     
-    def _readResults(self):
-        """
-        Extracts results as a pandas dataframe.
-        
-        """
-
-        self.detailedResults = pd.DataFrame({
-            "Heating Load": self.heating_load,
-            "Cooling Load": self.cooling_load,
-            "T_air": self.T_air,
-            "T_sur": self.T_sur,
-            "T_m": self.T_m,
-            "T_e": self.cfg["weather"]["T"].values,
-            "Electricity Load": self.cfg["elecLoad"].values,
-        }, index=[t for t in self.fullTimeIndex])
-
-        return
-
     def scaleHeatLoad(self, scale=1):
         """
-        Scales the original heat demand of the model to a relative value 
-        by scaling all U-values and the infiltration rate.
-        
-        scale
+        Scale original U-values and infiltration rates by `scale` to obtain relative heat loads.
+        Saves original values on first call.
         """
-        # check if original values have already been saved
-        if not bool(self._orig_U_Values):
+        if not hasattr(self, "_orig_U_Values"):
+            self._orig_U_Values = {}
+            # capture legacy U_* keys
             for key in self.cfg:
                 if str(key).startswith("U_"):
                     self._orig_U_Values[key] = self.cfg[key]
-            self._orig_U_Values["n_air_infiltration"] = self.cfg["n_air_infiltration"]
-            self._orig_U_Values["n_air_use"] = self.cfg["n_air_use"]
-        
-        # replace the values in the model
-        for key in self._orig_U_Values:
-            self.cfg[key] = self._orig_U_Values[key] * scale
+            self._orig_U_Values["n_air_infiltration"] = self.cfg.get("n_air_infiltration", 0.0)
+            self._orig_U_Values["n_air_use"] = self.cfg.get("n_air_use", 0.0)
 
-        return 
+        for key, val in self._orig_U_Values.items():
+            self.cfg[key] = val * scale
 
-    def _addConstraints(self, use_inequality_constraints:False):
+    # -------- constraints & solver --------
+    def _addConstraints(self, use_inequality_constraints: bool = False):
         """
-        Builds the coefficient matrices for the time-stepped 5R1C model (with surface node).
-        Variable order: [T_air_0, ..., T_air_n-1, T_m_0, ..., T_m_n-1, T_sur_0, ..., T_sur_n-1, Q_heat_0, ..., Q_heat_n-1, Q_cool_0, ..., Q_cool_n-1]
+        Assemble linear equality and optional inequality constraints for the time-stepped 5R1C model.
+        Variable order: [T_air_0, ..., T_air_n-1, T_m_0, ..., T_m_n-1, T_sur_0, ..., 
+        T_sur_n-1, Q_heat_0, ..., Q_heat_n-1, Q_cool_0, ..., Q_cool_n-1]
         
         Parameters
         ----------
@@ -680,37 +491,13 @@ class ModelBUEM(object):
         eq_rows, eq_vals = [], []
         ineq_rows, ineq_vals = [], []
 
-        # Initialization of series of Q_sol for plotting 
-        self.Q_sol_win_series = []
-        self.Q_sol_opaque_series = []
-
-        # --- Calculate conductances for each component group ---
-        # Walls, Roofs, Floors, Windows, Doors
-        def H_sum(component_list, prefix="U_", area_prefix="A_", trans_prefix="b_Transmission_"):
-            H = 0.0
-            for comp in component_list:
-                U = self.cfg.get(prefix + comp, 0)
-                A = self.cfg.get(area_prefix + comp, 0)
-                bT = self.cfg.get(trans_prefix + comp, 1)
-                H += U * A * bT / 1000  # [kW/K]
-            return H
-
-        H_walls = H_sum(self.walls)
-        H_roofs = H_sum(self.roofs)
-        H_floors = H_sum(self.floors)
-        H_windows = self.cfg.get("U_Window", 0) * self.cfg.get("A_Window", 0) / 1000
-        H_doors = self.cfg.get("U_Door_1", 0) * self.cfg.get("A_Door_1", 0) / 1000
-
-        # Ventilation/infiltration
-        A_ref = self.cfg.get("A_ref", 1)
-        h_room = self.cfg.get("h_room", 2.5)
-        rho_air = self.CONST["rho_air"]
-        C_air = self.CONST["C_air"]
-        n_air_infiltration = self.cfg.get("n_air_infiltration", 0.5)
-        n_air_use = self.cfg.get("n_air_use", 0.5)
-        H_ve = (
-            A_ref * h_room * rho_air * C_air * (n_air_infiltration + n_air_use) / 3600
-        )  # [kW/K]
+        # aggregated conductances from self.bH (Original state)
+        H_walls = self.bH.get("Walls", {}).get("Original", 0.0)
+        H_roofs = self.bH.get("Roof", {}).get("Original", 0.0)
+        H_floors = self.bH.get("Floor", {}).get("Original", 0.0)
+        H_windows = self.bH.get("Windows", {}).get("Original", 0.0)
+        H_doors = self.bH.get("Doors", {}).get("Original", 0.0)
+        H_ve = self.bH.get("Ventilation", {}).get("Original", 0.0)
 
         # Total transmission
         H_tot = H_ve + H_walls + H_roofs + H_floors + H_windows + H_doors
@@ -721,104 +508,34 @@ class ModelBUEM(object):
         H_is = self.bH_is if hasattr(self, "bH_is") else 3.6 /1000  # fallback
 
         step = self.stepSize
-        # comfortT_lb = self.cfg.get("comfortT_lb", 21.0)
-        # comfortT_ub = self.cfg.get("comfortT_ub", 24.0)
-        T_set = self.T_set
         sleeping_factor = 0.5
 
-        # Solar gains (windows, per direction)
-        window_dirs = ["North", "East", "South", "West", "Horizontal"]
-        g_gl = self.cfg.get("g_gl_n_Window", 0.5)
-        F_sh_vert = self.cfg.get("F_sh_vert", 1.0)
-        F_sh_hor = self.cfg.get("F_sh_hor", 1.0)
-        F_w = self.cfg.get("F_w", 1.0)
-        F_f = self.cfg.get("F_f", 0.0)
-        alpha = self.CONST["alpha"]        
+        # use precomputed solar profiles from _init5R1C
+        Q_win_profile = self.profiles.get("bQ_sol_Windows", np.zeros(len(self.times)))
+        Q_opaque_profile = self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times)))
 
-        # Temperature bounds if for inequality constraints
-        if use_inequality_constraints:
-            T_air_min, T_air_max = 15.0, 30.0
-            T_sur_min, T_sur_max = 10.0, 35.0
-            T_m_min, T_m_max = 15.0, 30.0
-            max_delta_T = 2.0  # Maximum temperature change per hour        
-
-        t = 0
         # Main loop for Building equations
         for i, (t1, t2) in enumerate(self.timeIndex):
-            # print(f"t: {t}")
-            t = t + 1
+            Q_sol_win = float(Q_win_profile[i])
+            Q_sol_opaque = float(Q_opaque_profile[i])
 
-            # --- Solar gains ---
-            # --- Windows ---
-            Q_sol_win = 0.0
-            for dir in window_dirs:
-                A_win = self.cfg.get(f"A_Window_{dir}", 0)
-                F_sh = F_sh_hor if dir == "Horizontal" else F_sh_vert
-                if dir in self._irrad_surf:  # by direction, using POA from _irrad_surf
-                    irrad = self._irrad_surf.loc[self.times[t2], dir]
-                else: # Approximate, or use directional if available
-                    irrad = self.cfg["weather"].loc[self.times[t2], "GHI"]
-
-                Q_sol_win += (
-                    A_win * g_gl * F_sh * F_w * (1 - F_f) * irrad
-                )  # [W], but all areas in m2, G in W/m2 # Check
-                
-            Q_sol_win = Q_sol_win / 1000  # [kW]
-            self.Q_sol_win_series.append(Q_sol_win)
-
-
-            # Opaque solar gains (walls, roofs, floors)
-            Q_sol_opaque = 0.0
-            if hasattr(self, "_irrad_surf"):
-                # Walls
-                for wall in self.walls:
-                    A = self.cfg.get(f"A_{wall}", 0)
-                    F_sh = F_sh_vert
-                    irrad = self._irrad_surf.loc[self.times[t2], wall] if wall in self._irrad_surf else 0
-                    Q_sol_opaque += A * alpha * F_sh * irrad  # [kW]
-                # Roofs
-                for roof in self.roofs:
-                    A = self.cfg.get(f"A_{roof}", 0)
-                    F_sh = F_sh_hor
-                    irrad = self._irrad_surf.loc[self.times[t2], roof] if roof in self._irrad_surf else 0
-                    Q_sol_opaque += A * alpha * F_sh * irrad  # [kW]
-                # Floors (usually no solar gain, but included for completeness)
-                for floor in self.floors:
-                    A = self.cfg.get(f"A_{floor}", 0)
-                    F_sh = 1.0
-                    irrad = self._irrad_surf.loc[self.times[t2], floor] if floor in self._irrad_surf else 0
-                    Q_sol_opaque += A * alpha * F_sh * irrad  # [kW]
+            # internal gains and occupancy
+            if isinstance(self.profiles.get("occ_nothome"), dict):
+                occ = 1 - self.profiles["occ_nothome"][(t1, t2)]
             else:
-                for comp, H_comp in zip(
-                    [self.walls, self.roofs, self.floors], [H_walls, H_roofs, H_floors]
-                ):
-                    for c in comp:
-                        A = self.cfg.get(f"A_{c}", 0)
-                        F_sh = F_sh_vert if "Wall" in c else F_sh_hor
-                        irrad = self.cfg["weather"].loc[self.times[t2], "GHI"]
-                        Q_sol_opaque += (
-                            A * alpha * F_sh * irrad
-                        ) / 1000  # [kW] # Check units for if and else
-
-            self.Q_sol_opaque_series.append(Q_sol_opaque)
-
-            # --- 1. Air node: Energy balance for the air node
-            # T_air = (H_is * T_sur + Q_ia + H_ve * T_e) / (H_is + H_ve) ---
-            # Internal gains = Q_ig + elecLoad
-            occ = 1 - self.profiles["occ_nothome"][(t1, t2)]
-            sleeping = self.profiles["occ_sleeping"][(t1, t2)]
-            Q_ig = self.profiles["Q_ig"][(t1, t2)]
-            elecLoad = self.cfg.get("elecLoad", pd.Series([0], index=[self.times[0]])).iloc[t2]
+                occ = 1 - float(self.profiles.get("occ_nothome", pd.Series(0, index=self.times)).iloc[i])
+            sleeping = float(self.profiles.get("occ_sleeping", pd.Series(0, index=self.times)).iloc[i])
+            Q_ig = float(self.profiles.get("bQ_ig", pd.Series(0, index=self.times)).iloc[i])
+            elecLoad = float(self.cfg.get("elecLoad", pd.Series(0, index=self.times)).iloc[i])
             Q_ia = (Q_ig + elecLoad) * (occ * (1 - sleeping) + sleeping_factor * sleeping)
 
-            T_e = self.profiles["T_e"][(t1, t2)]
-
-            # Add solar gains to air node (ISO: usually split between air and mass/surface)
-            # currently, we are doing a 50-50% split
+            T_e = self.profiles["T_e"][(t1, t2)] if isinstance(self.profiles.get("T_e"), dict) else float(self.cfg["weather"]["T"].iloc[i])
+            
+            # split solar gains: 50% to air, 50% to surface (ISO simplification)
             Q_air = Q_ia + 0.5 * Q_sol_win
+            Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
 
-            # T_air * (H_is + H_ve) - H_is * T_sur = Q_ia + H_ve * T_e
-            # Equality: air node energy balance
+            # 1) Air node balance: (H_is + H_ve) * T_air - H_is * T_sur - Q_HC = Q_air + H_ve * T_e
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_air(i)] = H_is + H_ve
             row[0, idx_T_sur(i)] = -H_is
@@ -827,14 +544,7 @@ class ModelBUEM(object):
             eq_rows.append(row)
             eq_vals.append(Q_air + H_ve * T_e)
 
-            # --- 2. Surface node: Energy balance for the surface node, coupled to air and mass nodes
-            # Add solar gains to surface node (ISO: usually split between surface and mass)
-            # currently, we are doing a 50-50% split
-            Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
-
-            # T_sur = (H_is * T_air + H_ms * T_m + Q_sur) / (H_is + H_ms) ---
-            # T_sur * (H_is + H_ms) - H_is * T_air - H_ms * T_m = Q_sur
-            # Equality: surface node energy balance
+            # 2) Surface node balance: (H_is + H_ms + H_windows) * T_sur - H_is * T_air - H_ms * T_m = Q_surface + H_windows * T_e
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_sur(i)] = H_is + H_ms + H_windows
             row[0, idx_T_air(i)] = -H_is
@@ -842,18 +552,16 @@ class ModelBUEM(object):
             eq_rows.append(row)
             eq_vals.append(Q_surface + H_windows*T_e)  
 
-            # --- 3. Mass node: Dynamic energy balance for the mass node, including coupling to surface and transmission to outside
-            # C_m * (T_m_next - T_m) / step = H_ms * (T_sur - T_m) - H_tr * (T_m - T_e) ---
-            # Equality: Mass node energy balance
+            # 3) Mass node dynamics (implicit-forward Euler):
+            # C_m * (T_m_next - T_m)/step = H_ms*(T_sur - T_m) - H_tot*(T_m - T_e)
             if i == 0:
                 row = lil_matrix((1, self.n_vars))
                 # Initial condition for T_m at first time step (set to comfort range)
                 row[0, idx_T_m(i)] = 1
                 eq_rows.append(row)
-                eq_vals.append(T_set)
+                eq_vals.append(self.T_set)
 
             elif i < n - 1:
-                # Mass node dynamics
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_m(i)] = -C_m / step - H_ms - H_tot
                 row[0, idx_T_m(i+1)] = C_m / step
@@ -869,71 +577,45 @@ class ModelBUEM(object):
                 eq_rows.append(row)
                 eq_vals.append(0)
 
-            # --- 4. Heating load: Q_heat = H_tot * T_air ---
-            # --- EQUALITY: Q_heat and Q_cool for fixed comfort temperature ---
-            # For equality-only solve, set T_air = (comfortT_lb + comfortT_ub)/2
+            # 4) HVAC equality for fixed-comfort solve: Q_HC = H_tot * T_set - H_tot * T_air
             if not use_inequality_constraints:
-                
-                # Q_heat = H_tot * max(0, T_set - T_air)
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_Q_HC(i)] = 1
                 row[0, idx_T_air(i)] = H_tot
                 eq_rows.append(row)
-                eq_vals.append(H_tot * T_set)
-
-                # Q_cool = H_tot * max(0, T_air - T_set)
-                # row = lil_matrix((1, self.n_vars))
-                # row[0, idx_Q_HC(i)] = 1
-                # row[0, idx_T_air(i)] = -H_tot
-                # eq_rows.append(row)
-                # eq_vals.append(-H_tot * T_set)
+                eq_vals.append(H_tot * self.T_set)
             
             else:
-                # Comfort bounds (inequality) comfort_ub >= T_air >= comfort_lb
+                 # add simple bounds on T_air, T_sur, T_m
+                T_air_min, T_air_max = 15.0, 30.0
+                T_sur_min, T_sur_max = 10.0, 35.0
+                T_m_min, T_m_max = 15.0, 30.0
+                max_delta_T = 2.0  # Maximum temperature change per hour        
+
+                # T_air <= T_air_max
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_air(i)] = 1
                 ineq_rows.append(row)
                 ineq_vals.append(T_air_max)
+
+                # -T_air <= -min  => T_air >= T_air_min
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_air(i)] = -1
                 ineq_rows.append(row)
                 ineq_vals.append(-T_air_min)
-                
-                # Q_heat >= H_tot * (comfort_lb - T_air), Q_heat >= 0
-                # row = lil_matrix((1, self.n_vars))
-                # row[0, idx_Q_heat(i)] = -1
-                # row[0, idx_T_air(i)] = H_tot
-                # ineq_rows.append(row)
-                # ineq_vals.append(H_tot * comfortT_lb)
-                # row = lil_matrix((1, self.n_vars))
-                # row[0, idx_Q_heat(i)] = -1
-                # ineq_rows.append(row)
-                # ineq_vals.append(0)
-                
-                # Q_cool >= H_tot * (T_air - comfort_ub), Q_cool >= 0
-                # row = lil_matrix((1, self.n_vars))
-                # row[0, idx_Q_cool(i)] = -1
-                # row[0, idx_T_air(i)] = -H_tot
-                # ineq_rows.append(row)
-                # ineq_vals.append(-H_tot * comfortT_ub)
-                # row = lil_matrix((1, self.n_vars))
-                # row[0, idx_Q_cool(i)] = -1
-                # ineq_rows.append(row)
-                # ineq_vals.append(0) 
 
-                # --- INEQUALITY: Surface and mass node bounds ---
-                # --- T_{sur, m}_min <= T_{sur, m}(t) <= T_{sur, m}_max
-                # surface
+                # surface bounds
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_sur(i)] = 1
                 ineq_rows.append(row)
                 ineq_vals.append(T_sur_max)
+
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_sur(i)] = -1
                 ineq_rows.append(row)
                 ineq_vals.append(-T_sur_min)
 
-                # mass
+                # mass bounds
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_m(i)] = 1
                 ineq_rows.append(row)
@@ -979,48 +661,36 @@ class ModelBUEM(object):
         If use_hard_constraints is True, use scipy.optimize.linprog to handle inequalities
         """
 
-        # ---adding initializations---
+        # prepare parameters and profiles
         self._initPara()
         self._initEnvelop()
         self._init5R1C()
 
+        # time indexing used in constraints (tuples for compatibility)
         self.timeIndex = [(1, t) for t in range(len(self.times))]
         self.fullTimeIndex = self.timeIndex
         timediff = self.times[1] - self.times[0]
         self.stepSize = timediff.total_seconds() / 3600
-        self.hasTypPeriods = False
-
-        # Prepare profiles (ensure bQ_ig, occ_nothome, occ_sleeping, T_e are dicts)
-        if not hasattr(self, "profiles"):
-            self.profiles = {}
         
-        # Convert time series into dictionary format
-        for key in ["Q_ig", "occ_nothome", "occ_sleeping"]:
-            if key not in self.profiles:
-                self.profiles[key] = self.cfg[key]
-            if isinstance(self.profiles[key], (pd.Series, np.ndarray, list)):
-                self.profiles[key] = {
-                    timeIndex: self.cfg[key].iloc[i] if hasattr(self.cfg[key], 'iloc') else self.cfg[key][i]
-                    for i, timeIndex in enumerate(self.timeIndex)
-                }
+        # ensure profiles present
+        self.profiles.setdefault("bQ_ig", self.cfg.get("Q_ig", pd.Series(0.0, index=self.times)))
+        self.profiles.setdefault("occ_nothome", self.cfg.get("occ_nothome", pd.Series(0.0, index=self.times)))
+        self.profiles.setdefault("occ_sleeping", self.cfg.get("occ_sleeping", pd.Series(0.0, index=self.times)))
         
         #set up separate runs for heating and cooling
         if comfort_mode == 'heating':
-            T_set = self.cfg["comfortT_lb"]  # e.g., 21.0
+            self.T_set = self.bT_comf_lb
         elif comfort_mode == 'cooling':
-            T_set = self.cfg["comfortT_ub"]  # e.g., 24.0
+            self.T_set = self.bT_comf_ub  
         else:
             raise ValueError("comfort_mode must be 'heating' or 'cooling'")  
 
-        #Pass T_set to _addConstraints
-        self.T_set = T_set      
-
-        # External temperature profile
+        # Ensure external temperature profile access in expected format
         if "T_e" not in self.profiles:
             self.profiles["T_e"] = self.cfg["weather"]["T"]
         if isinstance(self.profiles["T_e"], (pd.Series, np.ndarray, list)):
             self.profiles["T_e"] = {
-                timeIndex: self.cfg["weather"]["T"].iloc[i] if hasattr(self.cfg["weather"]["T"], 'iloc') else self.cfg["weather"]["T"][i]
+                timeIndex: float(self.cfg["weather"]["T"].iloc[i]) if hasattr(self.cfg["weather"]["T"], 'iloc') else self.cfg["weather"]["T"][i]
                 for i, timeIndex in enumerate(self.timeIndex)
             }
 
@@ -1028,20 +698,17 @@ class ModelBUEM(object):
         A_eq, b_eq, A_ineq, b_ineq = self._addConstraints(use_inequality_constraints=use_inequality_constraints) 
 
         # --- Solver selection ---
-        if use_inequality_constraints:
-            solver = 'cvxpy'
-        else:
-            solver = 'spsolve'
-
         n = len(self.timeIndex)
-
-        if solver == 'spsolve':
+        if not use_inequality_constraints:
+            if A_eq is None:
+                raise RuntimeError("No equality constraints assembled.")
             # Only equality constraints, must be square
             print(f"A_eq shape: {A_eq.shape}, A_eq.shape[0]: {A_eq.shape[0]}, A_eq.shape[1]: {A_eq.shape[1]} n_vars: {self.n_vars}")
             if A_eq.shape[0] != A_eq.shape[1]:
                 raise ValueError("A_eq must be square for spsolve.")
-            x = spsolve(A_eq.tocsr(), b_eq)
-        elif solver == 'cvxpy':
+            x = spsolve(A_eq.tocsr(), b_eq)            
+
+        else:
             x_var = cp.Variable(self.n_vars)
             # y = cp.Variable(n, boolean=True) # added a variable to setup MILP for switching between heat and cooling load, instead of both
             constraints = []
@@ -1057,30 +724,56 @@ class ModelBUEM(object):
                 # constraints.append(x_var[3*n + i] <= M * y[i])         # Q_heat <= M * y
                 # constraints.append(x_var[4*n + i] <= M * (1 - y[i]))   # Q_cool <= M * (1 - y)
             
-            prob = cp.Problem(cp.Minimize(cp.sum(x_var[3*n:4*n]) + cp.sum(x_var[4*n:5*n])), constraints)
+            obj = cp.Minimize(cp.sum(x_var[3*n:4*n]))
+            prob = cp.Problem( obj, constraints)
             # prob = cp.Problem(cp.Minimize(0), constraints)
             prob.solve(solver=cp.OSQP, verbose=False)
             # prob.solve(solver=cp.CBC, verbose=True) # CBC supports MILP
             if prob.status not in ["optimal", "optimal_inaccurate"]:
                 raise RuntimeError(f"cvxpy failed: {prob.status}")
             x = x_var.value
-        else:
-            raise ValueError("Unknown solver specified.")
         
+        # unpack results
         self.T_air = x[0:n]
         self.T_m = x[n:2*n]
         self.T_sur = x[2*n:3*n]
         self.Q_HC = x[3*n:4*n]
-        # self.heating_load = np.maximum(0, x[3*n:4*n])  # enforce non-negativity
-        # self.cooling_load = np.maximum(0, x[4*n:5*n])  # enforce non-negativity
+
         if comfort_mode == "heating": 
-            self.heating_load = np.maximum(0, self.Q_HC)
+            self.heating_load = np.maximum(0.0, self.Q_HC)
             self.cooling_load = np.zeros_like(self.Q_HC)
         else: 
             self.heating_load = np.zeros_like(self.Q_HC)
-            self.cooling_load = -np.minimum(0, self.Q_HC)
+            self.cooling_load = -np.minimum(0.0, self.Q_HC)
 
         # Call _readResults to process/store results further
         self._readResults()
         return        
 
+    def _readResults(self):
+        """
+        Extracts results as a pandas dataframe.
+        Populate detailedResults dataframe
+        """
+
+        self.detailedResults = pd.DataFrame({
+            "Heating Load": self.heating_load,
+            "Cooling Load": self.cooling_load,
+            "T_air": self.T_air,
+            "T_sur": self.T_sur,
+            "T_m": self.T_m,
+            "T_e": self.cfg["weather"]["T"].values,
+            "Electricity Load": self.cfg.get("elecLoad", pd.Series(0.0, index=self.times)).values,
+        }, index=[t for t in self.fullTimeIndex]
+        )
+        # Provide legacy/plotting-friendly attributes expected by standard_plots
+        # Use profiles produced in _init5R1C; fall back to zero arrays if missing
+        self.Q_sol_win_series = np.asarray(self.profiles.get("bQ_sol_Windows", np.zeros(len(self.times))))
+        print(f"Solar gains windows: {self.Q_sol_win_series.sum()}")
+        self.Q_sol_opaque_series = np.asarray(self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times))))
+        print(f"Solar gain all opaque components together: {self.Q_sol_opaque_series.sum()}")
+
+        # Ensure temperature arrays exist as 1D numpy arrays (aliases used by plotting)
+        self.T_air = np.asarray(self.T_air)
+        self.T_m = np.asarray(self.T_m)
+        self.T_sur = np.asarray(self.T_sur)

@@ -79,11 +79,11 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
     "bldg_tabula_id": AttributeSpec("bldg_tabula_id", AttributeCategory.FIXED, AttrType.STR, "NL.N.MFH.01.Gen"),
     "costdatapath": AttributeSpec("costdatapath", AttributeCategory.FIXED, AttrType.STR,
                                  os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "default_2016.xlsx"))),
-    "refurbishment": AttributeSpec("refurbishment", AttributeCategory.BOOLEAN, AttrType.BOOL, True),
-    "force_refurbishment": AttributeSpec("force_refurbishment", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
-    "occControl": AttributeSpec("occControl", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
-    "nightReduction": AttributeSpec("nightReduction", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
-    "capControl": AttributeSpec("capControl", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
+    "refurbishment": AttributeSpec("refurbishment", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="Deprecated: refurbishment decisions not used in parameterized model"),
+    "force_refurbishment": AttributeSpec("force_refurbishment", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="Deprecated"),
+    "occControl": AttributeSpec("occControl", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="Deprecated"),
+    "nightReduction": AttributeSpec("nightReduction", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="Deprecated"),
+    "capControl": AttributeSpec("capControl", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="Deprecated"),
     "elecLoad": AttributeSpec("elecLoad", AttributeCategory.FIXED, AttrType.SERIES,
                               default=pd.Series([0.5] * n_hours, index=main_index),
                               doc="Electric internal load profile (pd.Series)"),
@@ -98,6 +98,39 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
                                   doc="Sleeping occupancy profile"),
     "latitude": AttributeSpec("latitude", AttributeCategory.FIXED, AttrType.FLOAT, 52.0),
     "longitude": AttributeSpec("longitude", AttributeCategory.FIXED, AttrType.FLOAT, 5.0),
+    # New structured component tree: component-level U (same for all elements) + element list
+    "components": AttributeSpec(
+        "components",
+        AttributeCategory.OTHER,
+        AttrType.OBJECT,
+        default={
+            "Walls": {
+                "U": 1.61,
+                "b_transmission": 1.0,
+                "elements": [
+                    {"id": "Wall_1", "area": 200.0, "azimuth": 0.0, "tilt": 00.0},
+                    {"id": "Wall_2", "area": 150.0, "azimuth": 90.0, "tilt": 00.0},
+                ],
+            },
+            "Roof": {
+                "U": 1.54,
+                "elements": [
+                    {"id": "Roof_1", "area": 120.0, "azimuth": 135.0, "tilt": 30.0},
+                ],
+            },
+            "Floor": {"U": 1.72, "elements": [{"id": "Floor_1", "area": 469.0, "azimuth": 180.0, "tilt": 90.0}]},
+            "Windows": {
+                "U": 5.2,
+                "g_gl": 0.5,
+                "elements": [
+                    {"id": "Win_1", "area": 5.0, "surface": "Wall_1", "azimuth": 0.0, "tilt": 0.0},
+                    {"id": "Win_2", "area": 5.0, "surface": "Wall_2", "azimuth": 90.0, "tilt": 0.0},
+                ],
+            },
+            "Ventilation": {"elements": [{"id": "Vent_1", "air_changes": 0.5}]},
+        },
+        doc="Structured component tree. Component-level 'U' applies to all elements; elements list carries per-surface geometry and area."
+    ),
     "A_Roof_1": AttributeSpec("A_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 497.7),
     "U_Roof_1": AttributeSpec("U_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.54),
     "b_Transmission_Roof_1": AttributeSpec("b_Transmission_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.0),
