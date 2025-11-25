@@ -262,6 +262,7 @@ class ModelBUEM(object):
 
         # compute POA irradiance per element (populates self._irrad_surf in kW/m2)
         self._calcRadiation(surf_az, surf_tilt)
+        print("POA for all elements: \n", self._irrad_surf.columns, self._irrad_surf.head(20)) # test
 
         # Build solar gain profiles (kW time series arrays)
         # WINDOWS: each window element may reference a surface (surface field) or be its own surface
@@ -269,106 +270,134 @@ class ModelBUEM(object):
         self.F_sh_vert = float(self.cfg.get("F_sh_vert", 1.0))
         self.F_sh_hor = float(self.cfg.get("F_sh_hor", 1.0))
         self.F_w = float(self.cfg.get("F_w", 1.0))
-        self.F_f = float(self.cfg.get("F_f", 0.0))
+        self.F_f = float(self.cfg.get("F_f", 0.6))
+        # alpha (absorptance) used for opaque solar gains
+        alpha = float(self.bConst.get("alpha", 0.6))
 
-        # windows total profile
-        window_profiles = []
+        # windows: POA (kW/m2) * area (m2) * g * fractions -> kW
+        win_list = []
         for w in self.windows:
-            wid = w["id"]
-            area = float(w.get("area", 10.0))
+            wid = w.get("id")
+            area = float(w.get("area", 5.0))
             # window may reference a parent surface (e.g., "surface": "Wall_1")
             surf_ref = w.get("surface", wid)
             if surf_ref in self._irrad_surf.columns:
-                irr = self._irrad_surf[surf_ref].values  # kW/m2
+                poa = self._irrad_surf[surf_ref].values  # kW/m2
+            elif wid in self._irrad_surf.columns:
+                poa = self._irrad_surf[wid].values
             else:
                 # fallback to GHI (kW/m2)
-                irr = self.cfg["weather"]["GHI"].values / 1000.0
+                poa = self.cfg["weather"]["GHI"].values / 1000.0
+            
+            gwin = float(w.get("g_gl", self.g_gl))
             # Q [kW] = area * g_gl * irr * fraction factors - small thermal sky term handled below
-            window_profiles.append(area * self.g_gl * (1.0 - self.F_f) * self.F_w * irr)
-
-        if window_profiles:
-            self.profiles["bQ_sol_Windows"] = np.sum(np.vstack(window_profiles), axis=0)
-        else:
-            self.profiles["bQ_sol_Windows"] = np.zeros(len(self.times))
-
-        # thermal sky loss (approx) for windows using component bU and window-area-weighted factor
-        total_window_area = sum(float(w.get("area", 0.0)) for w in self.windows)
-        U_win = self.bU.get("Windows", float(self.cfg.get("U_Window", 0.0)))
-        thermal_rad_win = (
-            total_window_area
-            * self.bConst["h_r"]
-            * (U_win)
-            * self.bConst["R_se"]
-            * self.bConst["delta_T_sky"]
-        )
-        # subtract constant thermal_rad per time-step (convert to kW) — keep as scalar array
-        self.profiles["bQ_sol_Windows"] = self.profiles["bQ_sol_Windows"] - thermal_rad_win
-
-        # OPAQUE (Walls, Roof, Floor) : compute mean/aggregate irradiance per component and convert to Q [kW]
-        # alpha (absorptance) used for opaque solar gains
-        alpha = self.CONST["alpha"]
+            qwin = poa * area * gwin * (1.0 - self.F_f) * self.F_w
+            win_list.append(qwin)
         
-        # Walls (use element-wise irradiance)
-        wall_profiles = []
+        self.profiles["bQ_sol_Windows"] = np.sum(np.vstack(win_list), axis=0) if win_list else np.zeros(len(self.times))
+
+        # thermal sky loss for windows (use H_windows if available, else total area-based fallback)
+        H_windows = self.bH.get("Windows", {}).get("Original", 0.0)
+        if H_windows > 0:
+            thermal_rad_win = H_windows * self.bConst["h_r"] * self.bConst["R_se"] * self.bConst["delta_T_sky"]
+        else:
+            total_window_area = sum(float(w.get("area", 0.0)) for w in self.windows)      
+            U_win = self.bU.get("Windows", float(self.cfg.get("U_Window", 0.0)))
+            # U_win likely in W/m2/K -> convert to kW/m2/K for consistent units when needed
+            thermal_rad_win = (
+                total_window_area
+                * self.bConst["h_r"]
+                * (U_win/1000)
+                * self.bConst["R_se"]
+                * self.bConst["delta_T_sky"]
+            )
+        # ensure thermal_rad_win is kW and subtract
+        self.profiles["bQ_sol_Windows"] = self.profiles["bQ_sol_Windows"] - float(thermal_rad_win)
+
+        # OPAQUE: Walls and Roof (use element POA * area * alpha * shading)
+        wall_q = []
         for e in self.component_elements.get("Walls", []):
-            eid = e["id"]
+            eid = e.get("id")
             area = float(e.get("area", 0.0))
-            # use element POA if available, otherwise GHI
-            irr = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
-            wall_profiles.append(area * alpha * self.F_sh_vert * irr)
-            self.profiles["bQ_sol_Walls"] = np.sum(np.vstack(wall_profiles), axis=0) if wall_profiles else np.zeros(len(self.times))
+            poa = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
+            wall_q.append(area * alpha * self.F_sh_vert * poa)
+        self.profiles["bQ_sol_Walls"] = np.sum(np.vstack(wall_q), axis=0) if wall_q else np.zeros(len(self.times))
 
-        # Roofs
-        roof_profiles = []
+        roof_q = []
         for e in self.component_elements.get("Roof", []):
-            eid = e["id"]
-            area = float(e.get("area", 50.0))
-            irr = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
-            roof_profiles.append(area * alpha * self.F_sh_hor * irr)
-        self.profiles["bQ_sol_Roof"] = np.sum(np.vstack(roof_profiles), axis=0) if roof_profiles else np.zeros(len(self.times))
+            eid = e.get("id")
+            area = float(e.get("area", 0.0))
+            poa = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
+            roof_q.append(area * alpha * self.F_sh_hor * poa)
+        self.profiles["bQ_sol_Roof"] = np.sum(np.vstack(roof_q), axis=0) if roof_q else np.zeros(len(self.times))
 
-        # Floors (usually negligible solar)
         self.profiles["bQ_sol_Floor"] = np.zeros(len(self.times))
+        self.profiles["bQ_sol_Opaque"] = self.profiles["bQ_sol_Walls"] + self.profiles["bQ_sol_Roof"] + self.profiles["bQ_sol_Floor"]
 
-        # Combine opaque solar (walls+roof+floor)
-        self.profiles["bQ_sol_Opaque"] = (
-            self.profiles["bQ_sol_Walls"] + self.profiles["bQ_sol_Roof"] + self.profiles["bQ_sol_Floor"]
-        )
+        # provide debug sums (kWh per timestep is kW * 1h)
+        print("DEBUG solar sums (kW·h totals): windows:", self.profiles["bQ_sol_Windows"].sum(),
+              "opaque:", self.profiles["bQ_sol_Opaque"].sum())
 
     def _calcRadiation(self, surf_az:dict, surf_tilt:dict):
         """
         Compute plane-of-array (POA) irradiance for each surface element via pvlib.
         Results assigned to self._irrad_surf[col = element id] in kW/m2.
+        This implementation iterates all configured elements so _irrad_surf is
+        always populated for use by the solar-gain routines.
         """
-        # init required time series
-        SOL_POS = pvlib.solarposition.get_solarposition(
-            self.cfg["weather"].index, self.cfg.get("latitude", 52.0), self.cfg.get("longitude", 5.0)
+        # compute solar position and helpers
+        solpos = pvlib.solarposition.get_solarposition(
+            self.cfg["weather"].index,
+            self.cfg.get("latitude", 52.0),
+            self.cfg.get("longitude", 5.0),
         )
-        AM = pvlib.atmosphere.get_relative_airmass(SOL_POS["apparent_zenith"])
+        AM = pvlib.atmosphere.get_relative_airmass(solpos["apparent_zenith"])
         dni_extra = pvlib.irradiance.get_extra_radiation(self.cfg["weather"].index.dayofyear)
 
-        for key in surf_az:
-            tilt = surf_tilt.get(key, 0.0)
-            az = surf_az[key]
-            # calculate total irradiance depending on surface tilt and azimuth
-            total = pvlib.irradiance.get_total_irradiance(
-                surface_tilt=tilt,
-                surface_azimuth=az,
-                solar_zenith=SOL_POS["apparent_zenith"],
-                solar_azimuth=SOL_POS["azimuth"],
-                dni=self.cfg["weather"]["DNI"],
-                ghi=self.cfg["weather"]["GHI"],
-                dhi=self.cfg["weather"]["DHI"],
-                dni_extra=dni_extra,
-                airmass=AM,
-                model="perez",
-                surface_type="urban",
-            )
-            # store global plane of array (POA) irradiance and replace nan
-            self._irrad_surf[key] = total["poa_global"].fillna(0)
+        # ensure weather contains DNI/DHI/GHI (pvlib needs them)
+        if not all(k in self.cfg["weather"] for k in ("DNI", "DHI", "GHI")):
+            raise RuntimeError("Weather must include 'DNI','DHI' and 'GHI' series for POA calculations.")
 
-        # W/m2 to kW/m2
-        self._irrad_surf = self._irrad_surf / 1000 
+        df = pd.DataFrame(index=self.times)
+        for comp, elems in self.component_elements.items():
+            for e in elems:
+                eid = e.get("id")
+                if eid is None:
+                    continue
+                # pvlib tilt convention: 0 = horizontal up, 90 = vertical
+                if e.get("tilt") is not None:
+                    tilt = float(e.get("tilt"))
+                elif eid in surf_tilt:
+                    tilt = float(surf_tilt[eid])
+                else:
+                    # pvlib tilt: 0° horizontal up (roof/floor), 90° vertical (walls/windows)
+                    tilt = 0.0 if comp in ("Roof", "Floor") else 90.0
+                
+                # Resolve azimuth precedence: element -> surf_az dict -> default (180° south)
+                if e.get("azimuth") is not None:
+                    az = float(e.get("azimuth"))
+                elif eid in surf_az:
+                    az = float(surf_az[eid])
+                else:
+                    az = 180.0
+
+                # calculate total irradiance depending on surface tilt and azimuth
+                total = pvlib.irradiance.get_total_irradiance(
+                    surface_tilt=float(tilt),
+                    surface_azimuth=float(az),
+                    solar_zenith=solpos["apparent_zenith"],
+                    solar_azimuth=solpos["azimuth"],
+                    dni=self.cfg["weather"]["DNI"],
+                    ghi=self.cfg["weather"]["GHI"],
+                    dhi=self.cfg["weather"]["DHI"],
+                    dni_extra=dni_extra,
+                    airmass=AM,
+                    model="perez",
+                )
+                # store POA in kW/m2
+                df[eid] = total["poa_global"].fillna(0) / 1000.0
+        self._irrad_surf = df
+        return df
 
     # -------- design load --------
     def calcDesignHeatLoad(self) -> float:
@@ -744,7 +773,7 @@ class ModelBUEM(object):
             self.cooling_load = np.zeros_like(self.Q_HC)
         else: 
             self.heating_load = np.zeros_like(self.Q_HC)
-            self.cooling_load = -np.minimum(0.0, self.Q_HC)
+            self.cooling_load = np.minimum(0.0, self.Q_HC)
 
         # Call _readResults to process/store results further
         self._readResults()
@@ -777,3 +806,68 @@ class ModelBUEM(object):
         self.T_air = np.asarray(self.T_air)
         self.T_m = np.asarray(self.T_m)
         self.T_sur = np.asarray(self.T_sur)
+
+        det = self.diagnostics_solar_components()
+        print(f"Diagnostic solar components: {det}")
+
+    def diagnostics_solar_components(self):
+        """
+        Print and return diagnostics for solar terms and component geometry:
+        - per-component total area
+        - mean POA (kW/m2) across elements
+        - H (kW/K), H * R_se, thermal_rad (kW) and profile sums (kWh)
+        """
+        det = {}
+        R_se = float(self.bConst.get("R_se", 0.0))
+        h_r = float(self.bConst.get("h_r", 0.0))
+        delta_T_sky = float(self.bConst.get("delta_T_sky", 0.0))
+        n = len(self.times)
+
+        for comp, elems in self.component_elements.items():
+            areas = [float(e.get("area", 0.0)) for e in elems]
+            total_area = float(np.sum(areas)) if areas else 0.0
+
+            # area-weighted mean POA (kW/m2)
+            poa_vals = []
+            for e in elems:
+                eid = e.get("id")
+                if eid in self._irrad_surf.columns:
+                    poa_vals.append(float(self._irrad_surf[eid].mean()))
+            mean_poa = float(np.mean(poa_vals)) if poa_vals else 0.0
+
+            # H (aggregated conductance) and derived terms
+            H_comp = float(self.bH.get(comp, {}).get("Original", 0.0))
+            H_times_Rse = H_comp * R_se
+            thermal_rad = H_comp * h_r * R_se * delta_T_sky
+
+            # profile-based solar (kWh/year) if available in profiles
+            profile_key = {
+                "Windows": "bQ_sol_Windows",
+                "Walls": "bQ_sol_Walls",
+                "Roof": "bQ_sol_Roof",
+                "Floor": "bQ_sol_Floor",
+            }.get(comp, None)
+            profile_sum = float(np.sum(self.profiles.get(profile_key, np.zeros(n)))) if profile_key else 0.0
+
+            det[comp] = {
+                "total_area_m2": total_area,
+                "mean_poa_kW_m2": mean_poa,
+                "H_kW_per_K": H_comp,
+                "H_times_R_se": H_times_Rse,
+                "thermal_rad_kW": thermal_rad,
+                "profile_sum_kWh": profile_sum,
+            }
+
+        # Print concise table-like diagnostics
+        print("SOLAR/COMPONENT DIAGNOSTICS")
+        for comp, info in det.items():
+            print(
+                f" - {comp}: area={info['total_area_m2']:.1f} m2, mean_poa={info['mean_poa_kW_m2']:.4f} kW/m2, "
+                f"H={info['H_kW_per_K']:.4f} kW/K, H*R_se={info['H_times_R_se']:.4f}, "
+                f"thermal_rad={info['thermal_rad_kW']:.4f} kW, profile_sum={info['profile_sum_kWh']:.2f} kWh"
+            )
+        # additional global checks
+        windows_sum = float(np.sum(self.profiles.get("bQ_sol_Windows", np.zeros(n))))
+        opaque_sum = float(np.sum(self.profiles.get("bQ_sol_Opaque", np.zeros(n))))
+        print(f" GLOBAL: windows_total_kWh={windows_sum:.2f}, opaque_total_kWh={opaque_sum:.2f}")
+        return det

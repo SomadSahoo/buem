@@ -2,6 +2,7 @@ import time
 from buem.thermal.model_buem import ModelBUEM
 from buem.results.standard_plots import PlotVariables as pvar
 from buem.config.cfg_attribute import cfg
+import numpy as np
 
 # from multiprocessing import Process, Manager
 
@@ -42,7 +43,15 @@ def run_model(cfg_dict, plot=False):
             print("Plotting failed: ", str(e))
             traceback.print_exc()
 
-    return {"times": model_heat.times, "heating": heating_load, "cooling": cooling_load, "elapsed_s": elapsed}
+    # include model objects for diagnostics
+    return {
+        "times": model_heat.times, 
+        "heating": heating_load, 
+        "cooling": cooling_load, 
+        "elapsed_s": elapsed,
+        "model_heat": model_heat,
+        "model_cool": model_cool
+        }
 
 
 def main():
@@ -75,6 +84,44 @@ def main():
     # print(model_heat.detailedResults)
 
     print(f"Execution Time: {res['elapsed_s']:.2f} seconds")
+
+    mh = res.get("model_heat")
+    mc = res.get("model_cool")
+
+    # print per-component solar diagnostics from the model instances
+    if mh is not None:
+        print("\n=== Diagnostics: model_heat ===")
+        mh.diagnostics_solar_components()
+        # Additional low level diagnostics
+        try:
+            print("\nLOW-LEVEL PARAMS (model_heat):")
+            print(" bU (U-values W/m2K):", mh.bU)
+            print(" bH (kW/K):", mh.bH)
+            print(" bC_m (kJ/K or stored):", getattr(mh, 'bC_m', None))
+            print(" floor_area (m2):", sum(e.get('area',0.0) for e in mh.component_elements.get('Floor', [])))
+            print(" total_floor_area (m2):", sum(e.get('area',0.0) for comp in ('Floor','Walls','Roof') for e in mh.component_elements.get(comp, [])))
+            # per-m2 energy
+            floor_area = sum(e.get('area',0.0) for e in mh.component_elements.get('Floor', [])) or 1.0
+            print(f" Heating per floor area: {res['heating'].sum()/floor_area:.1f} kWh/m2-yr")
+            print(f" Cooling per floor area: {abs(res['cooling'].sum())/floor_area:.1f} kWh/m2-yr")
+        except Exception as _e:
+            print("Could not print low-level params:", _e)
+    if mc is not None:
+        print("\n=== Diagnostics: model_cool ===")
+        mc.diagnostics_solar_components()
+
+    # Count hours with heating and cooling active (cooling stored as <= 0 in this model)
+    heating = res["heating"]
+    cooling = res["cooling"]
+    # heating active if > 0, cooling active if < 0 (model stores cooling as negative)
+    heat_active = np.asarray(heating) > 0.0
+    cool_active = np.asarray(cooling) < 0.0
+    both_active = np.logical_and(heat_active, cool_active)
+    n_heat_hours = int(np.sum(heat_active))
+    n_cool_hours = int(np.sum(cool_active))
+    n_both_hours = int(np.sum(both_active))
+    n_total = len(res["times"])
+    print(f"\nOPERATION COUNTS (year, {n_total} h): heating_hours={n_heat_hours}, cooling_hours={n_cool_hours}, simultaneous_hours={n_both_hours}")
 
 
 if __name__=="__main__":
