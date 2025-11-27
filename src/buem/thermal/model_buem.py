@@ -4,6 +4,10 @@ from scipy.sparse.linalg import spsolve
 from scipy.sparse import lil_matrix, vstack
 import pandas as pd
 import numpy as np
+import os 
+import shutil
+import platform
+from dotenv import load_dotenv
 
 class ModelBUEM(object):
     """
@@ -540,8 +544,14 @@ class ModelBUEM(object):
         sleeping_factor = 0.5
 
         # use precomputed solar profiles from _init5R1C
-        Q_win_profile = self.profiles.get("bQ_sol_Windows", np.zeros(len(self.times)))
-        Q_opaque_profile = self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times)))
+        Q_win_profile = np.asarray(self.profiles.get("bQ_sol_Windows", np.zeros(len(self.times))))
+        Q_opaque_profile = np.asarray(self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times))))
+        Q_ig_profile = np.asarray(self.profiles.get("bQ_ig", np.zeros(len(self.times))))
+
+        # arrays for milp_meta
+        Q_air_list = np.zeros(n)
+        Q_surface_list = np.zeros(n)
+        T_e_list = np.zeros(n)
 
         # Main loop for Building equations
         for i, (t1, t2) in enumerate(self.timeIndex):
@@ -563,6 +573,11 @@ class ModelBUEM(object):
             # split solar gains: 50% to air, 50% to surface (ISO simplification)
             Q_air = Q_ia + 0.5 * Q_sol_win
             Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
+
+            # store for MILP meta
+            Q_air_list[i] = Q_air
+            Q_surface_list[i] = Q_surface
+            T_e_list[i] = T_e
 
             # 1) Air node balance: (H_is + H_ve) * T_air - H_is * T_sur - Q_HC = Q_air + H_ve * T_e
             row = lil_matrix((1, self.n_vars))
@@ -621,6 +636,7 @@ class ModelBUEM(object):
                 T_m_min, T_m_max = 15.0, 30.0
                 max_delta_T = 2.0  # Maximum temperature change per hour        
 
+                # air bounds
                 # T_air <= T_air_max
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_air(i)] = 1
@@ -649,6 +665,7 @@ class ModelBUEM(object):
                 row[0, idx_T_m(i)] = 1
                 ineq_rows.append(row)
                 ineq_vals.append(T_m_max)
+                
                 row = lil_matrix((1, self.n_vars))
                 row[0, idx_T_m(i)] = -1
                 ineq_rows.append(row)
@@ -677,17 +694,245 @@ class ModelBUEM(object):
         A_ineq = vstack(ineq_rows) if ineq_rows else None
         b_ineq = np.array(ineq_vals) if ineq_vals else None
 
-        return A_eq, b_eq, A_ineq, b_ineq
-    
-    def sim_model(self, use_inequality_constraints:False, comfort_mode="heating"):
+        # conservative big-M computed from design load and peak gains
+        try:
+            design = max(1.0, float(self.calcDesignHeatLoad()))
+        except Exception:
+            design = 1000.0
+        
+        # use H_tot, comfort band and per-hour gains to form a tighter bound per timestep
+        temp_range = max(0.1, abs(self.bT_comf_ub - self.bT_comf_lb))
+        M_array = np.zeros(n)
+        for i in range(n):
+            # base peak power to overcome heat losses over one hour + gains
+            peak_gain = abs(Q_air_list[i]) + abs(Q_surface_list[i])
+            approx_loss_power = H_tot * temp_range
+            M_i = max(100.0, 2.0 * design, approx_loss_power + 2.0 * peak_gain)
+            M_array[i] = M_i
+
+        milp_meta = {
+            "n": n,
+            "H_is": H_is,
+            "H_ms": H_ms,
+            "H_windows": H_windows,
+            "H_ve": H_ve,
+            "H_tot": H_tot,
+            "C_m": C_m,
+            "step": step,
+            "Q_air": Q_air_list,
+            "Q_surface": Q_surface_list,
+            "T_e": T_e_list,
+            "M_array": M_array,
+        }
+
+        return A_eq, b_eq, A_ineq, b_ineq, milp_meta
+
+    def _ensure_milp_solver(self):
+        """
+        Discover MILP solver. Return tuple (cvxpy_solver_or_None, cbc_exe_path_or_None, glpsol_path_or_None).
+
+        - If cvxpy exposes a MILP-capable solver (CBC or GLPK_MI) return that constant as first element.
+        - Otherwise return (None, cbc_path, glpsol_path) so callers can fall back to external executable (PuLP).
+        """
+        pkg_dir = os.path.dirname(__file__)
+        # search for .env up to a few levels and load it (python-dotenv)
+        cur = os.path.abspath(os.path.join(pkg_dir, ".."))
+        found_env = None
+        for _ in range(5):
+            env_path = os.path.join(cur, ".env")
+            if os.path.isfile(env_path):
+                found_env = env_path
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        if found_env:
+            try:
+                load_dotenv(found_env, override=False)
+                print(f"[MILP] Loaded .env: {found_env}")
+            except Exception:
+                print("[MILP] Warning: python-dotenv failed to load .env (continuing)")
+
+        def clean_path(p):
+            if p is None:
+                return None
+            s = str(p).strip()
+            if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+                s = s[1:-1]
+            s = os.path.expandvars(os.path.expanduser(s))
+            return os.path.abspath(s)
+
+        cbc_exe_env = clean_path(os.environ.get("BUEM_CBC_EXE"))
+        cbc_dir_env = clean_path(os.environ.get("BUEM_CBC_DIR"))
+
+        # candidate dirs (vendor / softwares / env-specified)
+        vendor_candidates = [
+            os.path.normpath(os.path.join(pkg_dir, "..", "vendors", "cbc")),
+            os.path.normpath(os.path.join(pkg_dir, "..", "vendors", "cbc", "bin")),
+            os.path.normpath(os.path.join(pkg_dir, "..", "softwares")),
+            os.path.normpath(os.path.join(pkg_dir, "..", "softwares", "bin")),
+        ]
+        if cbc_exe_env:
+            vendor_candidates.insert(0, os.path.dirname(cbc_exe_env))
+        if cbc_dir_env:
+            vendor_candidates.insert(0, cbc_dir_env)
+
+        added_dirs = []
+        for d in vendor_candidates:
+            if not d:
+                continue
+            dabs = os.path.abspath(d)
+            if os.path.isdir(dabs) and dabs not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = dabs + os.pathsep + os.environ.get("PATH", "")
+                added_dirs.append(dabs)
+
+        print(f"[MILP] Env BUEM_CBC_EXE = {cbc_exe_env}")
+        print(f"[MILP] Env BUEM_CBC_DIR = {cbc_dir_env}")
+        if added_dirs:
+            print(f"[MILP] Added to PATH: {added_dirs}")
+
+        # locate executables
+        cbc_path = shutil.which("cbc") or shutil.which("cbc.exe") or (cbc_exe_env if cbc_exe_env and os.path.isfile(cbc_exe_env) else None)
+        glpsol_path = shutil.which("glpsol") or shutil.which("glpk.exe")
+
+        print(f"[MILP] shutil.which -> cbc: {cbc_path}, glpsol: {glpsol_path}")
+        print(f"[MILP] cvxpy.installed_solvers(): {cp.installed_solvers()}")
+
+        # prefer cvxpy enumerated solvers if available
+        if "CBC" in cp.installed_solvers():
+            return cp.CBC, cbc_path, glpsol_path
+        if "GLPK_MI" in cp.installed_solvers():
+            return cp.GLPK_MI, cbc_path, glpsol_path
+
+        # otherwise return None and discovered executable paths for external solver usage
+        return None, cbc_path, glpsol_path
+
+    def _build_and_solve_milp(self, milp_meta):
+        """
+        Build & solve MILP from milp_meta. Use cvxpy solver if available;
+        otherwise fall back to PuLP + external CBC executable (path from _ensure_milp_solver).
+        """
+        n = int(milp_meta["n"])
+        H_is = float(milp_meta["H_is"])
+        H_ms = float(milp_meta["H_ms"])
+        H_windows = float(milp_meta["H_windows"])
+        H_ve = float(milp_meta["H_ve"])
+        H_tot = float(milp_meta["H_tot"])
+        C_m = float(milp_meta["C_m"])
+        step = float(milp_meta["step"])
+        Q_air = np.asarray(milp_meta["Q_air"])
+        Q_surface = np.asarray(milp_meta["Q_surface"])
+        T_e = np.asarray(milp_meta["T_e"])
+        M_array = np.asarray(milp_meta.get("M_array", None))
+        if M_array is None:
+            M_array = np.full(n, float(milp_meta.get("M", 1e4)))
+
+        # build cvxpy model variables (preferred)
+        T_air = cp.Variable(n)
+        T_m = cp.Variable(n)
+        T_sur = cp.Variable(n)
+        Q_heat = cp.Variable(n, nonneg=True)
+        Q_cool = cp.Variable(n, nonneg=True)
+        y = cp.Variable(n, boolean=True)
+
+        constraints = []
+        for i in range(n):
+            constraints.append((H_is + H_ve) * T_air[i] - H_is * T_sur[i] - Q_heat[i] + Q_cool[i] == Q_air[i] + H_ve * T_e[i])
+            constraints.append((H_is + H_ms + H_windows) * T_sur[i] - H_is * T_air[i] - H_ms * T_m[i] == Q_surface[i] + H_windows * T_e[i])
+            if i == 0:
+                constraints.append(T_m[0] == self.T_set)
+            elif i < n - 1:
+                constraints.append((-C_m / step - H_ms - H_tot) * T_m[i] + (C_m / step) * T_m[i + 1] + H_ms * T_sur[i] == -H_tot * T_e[i])
+            else:
+                constraints.append(T_m[n - 1] - T_m[0] == 0)
+            constraints.append(T_air[i] >= self.bT_comf_lb)
+            constraints.append(T_air[i] <= self.bT_comf_ub)
+            Mi = float(M_array[i])
+            constraints.append(Q_heat[i] <= Mi * y[i])
+            constraints.append(Q_cool[i] <= Mi * (1 - y[i]))
+
+        objective = cp.Minimize(cp.sum(Q_heat + Q_cool))
+        prob = cp.Problem(objective, constraints)
+
+        solver_enum, cbc_path, glpsol_path = self._ensure_milp_solver()
+
+        if solver_enum is not None:
+            # let cvxpy solve with its solver enum
+            prob.solve(solver=solver_enum, verbose=False)
+            if prob.status not in ["optimal", "optimal_inaccurate"]:
+                raise RuntimeError(f"MILP solve failed (status={prob.status})")
+            self.T_air = np.asarray(T_air.value).astype(float)
+            self.T_m = np.asarray(T_m.value).astype(float)
+            self.T_sur = np.asarray(T_sur.value).astype(float)
+            self.Q_heat = np.asarray(Q_heat.value).astype(float)
+            self.Q_cool = np.asarray(Q_cool.value).astype(float)
+        else:
+            # fallback: use PuLP + cbc executable
+            try:
+                import pulp
+            except Exception:
+                raise RuntimeError("No cvxpy MILP solver available and PuLP not installed. Install pulp (pip install pulp).")
+
+            if not cbc_path:
+                raise RuntimeError("No CBC executable found and cvxpy has no MILP solver interface. Set BUEM_CBC_EXE in .env or install a cvxpy-supported solver.")
+
+            # build PuLP model (same constraints)
+            prob_pulp = pulp.LpProblem("buem_milp", pulp.LpMinimize)
+            T_air_p = [pulp.LpVariable(f"T_air_{i}", lowBound=None, upBound=None, cat="Continuous") for i in range(n)]
+            T_m_p = [pulp.LpVariable(f"T_m_{i}", lowBound=None, upBound=None, cat="Continuous") for i in range(n)]
+            T_sur_p = [pulp.LpVariable(f"T_sur_{i}", lowBound=None, upBound=None, cat="Continuous") for i in range(n)]
+            Q_heat_p = [pulp.LpVariable(f"Q_heat_{i}", lowBound=0, cat="Continuous") for i in range(n)]
+            Q_cool_p = [pulp.LpVariable(f"Q_cool_{i}", lowBound=0, cat="Continuous") for i in range(n)]
+            y_p = [pulp.LpVariable(f"y_{i}", cat="Binary") for i in range(n)]
+
+            for i in range(n):
+                prob_pulp += ((H_is + H_ve) * T_air_p[i] - H_is * T_sur_p[i] - Q_heat_p[i] + Q_cool_p[i] == Q_air[i] + H_ve * T_e[i])
+                prob_pulp += ((H_is + H_ms + H_windows) * T_sur_p[i] - H_is * T_air_p[i] - H_ms * T_m_p[i] == Q_surface[i] + H_windows * T_e[i])
+                if i == 0:
+                    prob_pulp += (T_m_p[0] == self.T_set)
+                elif i < n - 1:
+                    prob_pulp += ((-C_m / step - H_ms - H_tot) * T_m_p[i] + (C_m / step) * T_m_p[i+1] + H_ms * T_sur_p[i] == -H_tot * T_e[i])
+                else:
+                    prob_pulp += (T_m_p[n-1] - T_m_p[0] == 0)
+                prob_pulp += (T_air_p[i] >= self.bT_comf_lb)
+                prob_pulp += (T_air_p[i] <= self.bT_comf_ub)
+                Mi = float(M_array[i])
+                prob_pulp += (Q_heat_p[i] <= Mi * y_p[i])
+                prob_pulp += (Q_cool_p[i] <= Mi * (1 - y_p[i]))
+
+            prob_pulp += pulp.lpSum([Q_heat_p[i] + Q_cool_p[i] for i in range(n)])
+            # Use PULP_CBC_CMD without explicit path (we already added the cbc dir to PATH).
+            # Passing path to PULP_CBC_CMD may raise "Use COIN_CMD if you want to set a path".
+            # If you prefer passing a path, use pulp.COIN_CMD(path=cbc_path) instead.
+            solver_cmd = pulp.PULP_CBC_CMD(msg=False)
+            res = prob_pulp.solve(solver_cmd)
+            status = pulp.LpStatus[res] if isinstance(res, int) else pulp.LpStatus.get(res, res)
+            if status not in ("Optimal", "optimal"):
+                raise RuntimeError(f"PuLP/CBC solve failed: status={status}")
+
+            self.T_air = np.array([v.value() for v in T_air_p], dtype=float)
+            self.T_m = np.array([v.value() for v in T_m_p], dtype=float)
+            self.T_sur = np.array([v.value() for v in T_sur_p], dtype=float)
+            self.Q_heat = np.array([v.value() for v in Q_heat_p], dtype=float)
+            self.Q_cool = np.array([v.value() for v in Q_cool_p], dtype=float)
+
+        self.heating_load = np.maximum(0.0, self.Q_heat)
+        self.cooling_load = -np.maximum(0.0, self.Q_cool)
+
+        self._readResults()
+        return
+
+    def sim_model(self, use_inequality_constraints: bool = False, comfort_mode: str ="heating", use_milp: bool = False):
         """
         ISO-compliant parameterization run for the building model with sparse matrix solve 
         (with surface node, all components, and detailed solar gains).
         
         Parameter
         ---------
-        Boolean: use_hard_constraints: default=False
-        If use_hard_constraints is True, use scipy.optimize.linprog to handle inequalities
+        Boolean: use_inequality_constraints: default = False
+        String: comfort_mode: default = "heating"
+        Boolean: use_milp: default = False
         """
 
         # prepare parameters and profiles
@@ -697,7 +942,6 @@ class ModelBUEM(object):
 
         # time indexing used in constraints (tuples for compatibility)
         self.timeIndex = [(1, t) for t in range(len(self.times))]
-        self.fullTimeIndex = self.timeIndex
         timediff = self.times[1] - self.times[0]
         self.stepSize = timediff.total_seconds() / 3600
         
@@ -717,14 +961,18 @@ class ModelBUEM(object):
         # Ensure external temperature profile access in expected format
         if "T_e" not in self.profiles:
             self.profiles["T_e"] = self.cfg["weather"]["T"]
-        if isinstance(self.profiles["T_e"], (pd.Series, np.ndarray, list)):
-            self.profiles["T_e"] = {
-                timeIndex: float(self.cfg["weather"]["T"].iloc[i]) if hasattr(self.cfg["weather"]["T"], 'iloc') else self.cfg["weather"]["T"][i]
-                for i, timeIndex in enumerate(self.timeIndex)
-            }
+#        if isinstance(self.profiles["T_e"], (pd.Series, np.ndarray, list)):
+#            self.profiles["T_e"] = {
+#                timeIndex: float(self.cfg["weather"]["T"].iloc[i]) if hasattr(self.cfg["weather"]["T"], 'iloc') else self.cfg["weather"]["T"][i]
+#                for i, timeIndex in enumerate(self.timeIndex)
+#            }
 
-        # Build constraint matrices ---
-        A_eq, b_eq, A_ineq, b_ineq = self._addConstraints(use_inequality_constraints=use_inequality_constraints) 
+        # Build constraint matrices, milp metadata ---
+        A_eq, b_eq, A_ineq, b_ineq, milp_meta = self._addConstraints(use_inequality_constraints=use_inequality_constraints) 
+
+        # MILP path
+        if use_milp:
+            return self._build_and_solve_milp(milp_meta)
 
         # --- Solver selection ---
         n = len(self.timeIndex)
@@ -793,7 +1041,7 @@ class ModelBUEM(object):
             "T_m": self.T_m,
             "T_e": self.cfg["weather"]["T"].values,
             "Electricity Load": self.cfg.get("elecLoad", pd.Series(0.0, index=self.times)).values,
-        }, index=[t for t in self.fullTimeIndex]
+        }, index=[t for t in self.timeIndex]
         )
         # Provide legacy/plotting-friendly attributes expected by standard_plots
         # Use profiles produced in _init5R1C; fall back to zero arrays if missing

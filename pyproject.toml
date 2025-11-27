@@ -24,6 +24,8 @@ dependencies = [
     "flask"
     "python-dotenv"
     "gunicorn"
+    "coincbc"
+    "pulp"
 ]
 keywords = [
     "building",

@@ -26,6 +26,8 @@ requirements:
     - flask
     - python-dotenv
     - gunicorn
+    - coincbc
+    - pulp
 
 about:
   summary: "Building thermal simulation module (ISO 52016-1 5R1C)"

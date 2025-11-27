@@ -15,21 +15,36 @@ import numpy as np
 #         return_dict['model_cool'] = model
 
 
-def run_model(cfg_dict, plot=False):
+def run_model(cfg_dict, plot: bool = False, use_milp: bool = False):
     """
     Run ModelBUEM for heating and cooling and return results.
     Returns dict: {"times": DatetimeIndex, "heating": pd.Series, "cooling": pd.Series}
     """
     starttime = time.time()
+
+    if use_milp:
+        model = ModelBUEM(cfg_dict)
+        model.sim_model(use_inequality_constraints=True, comfort_mode="heating", use_milp=True)
+        heating_load = model.heating_load.copy()
+        cooling_load = model.cooling_load.copy()
+        elapsed = time.time() - starttime
+        return {
+            "times": model.times,
+            "heating": heating_load,
+            "cooling": cooling_load,
+            "elapsed_s": elapsed,
+            "model_heat": model,
+            "model_cool": model,
+        }
     
     # model run for heating
     model_heat = ModelBUEM(cfg_dict)
-    model_heat.sim_model(use_inequality_constraints=False, comfort_mode="heating")
+    model_heat.sim_model(use_inequality_constraints=False, comfort_mode="heating", use_milp=False)
     heating_load = model_heat.heating_load.copy()
     
     # model run for cooling
     model_cool = ModelBUEM(cfg_dict)
-    model_cool.sim_model(use_inequality_constraints=False, comfort_mode="cooling")
+    model_cool.sim_model(use_inequality_constraints=False, comfort_mode="cooling", use_milp=False)
     cooling_load = model_cool.cooling_load.copy()
     elapsed = time.time() - starttime
 
@@ -55,7 +70,22 @@ def run_model(cfg_dict, plot=False):
 
 
 def main():
-    res = run_model(cfg, plot=True)
+    res = run_model(cfg, plot=True, use_milp=True)
+
+    heating = res["heating"]
+    cooling = res["cooling"]
+
+    total_abs = float(np.sum(heating) + np.sum(np.abs(cooling)))
+    print("Total absolute HVAC (heating + |cooling|):", total_abs)
+
+    # check simultaneous hours (if model exposes Q_heat/Q_cool arrays)
+    mh = res.get("model_heat")
+    if mh is not None and hasattr(mh, "Q_heat") and hasattr(mh, "Q_cool"):
+        qh = np.asarray(mh.Q_heat)
+        qc = np.asarray(mh.Q_cool)
+        sim_hours = int(np.sum((qh > 1e-6) & (qc > 1e-6)))
+        print("Simultaneous heating+cooling hours (model_heat):", sim_hours)
+
     # Create and run the model
     # starttime = time.time()
     # manager = Manager()
