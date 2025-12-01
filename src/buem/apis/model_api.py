@@ -7,6 +7,7 @@ import logging
 
 from buem.config.cfg_building import CfgBuilding
 from buem.main import run_model
+from buem.config.validator import validate_cfg
 
 bp = Blueprint("model_api", __name__, url_prefix="/api")
 logger = logging.getLogger(__name__)
@@ -25,8 +26,14 @@ def run_building_model():
         cfgb = CfgBuilding(json.dumps(payload))
         cfg = cfgb.to_cfg_dict()
 
-        # call centralized runner
-        res = run_model(cfg, plot=False)
+        # run centralized validator (returns list of issues)
+        issues = validate_cfg(cfg)
+        if issues:
+            return jsonify({"status": "error", "error": "validation_failed", "issues": issues}), 400
+
+        # call centralized runner (allow caller to request MILP)
+        use_milp = bool(payload.get("use_milp", False))
+        res = run_model(cfg, plot=False, use_milp=use_milp)
         times = res["times"]
         heating = res["heating"]
         cooling = res["cooling"]

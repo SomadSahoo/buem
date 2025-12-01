@@ -1,7 +1,10 @@
 FROM continuumio/miniconda3
 
 # install curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# install system CBC binary so PuLP/cvxpy can call it reliably in container
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl coinor-cbc \
+    && rm -rf /var/lib/apt/lists/*
 
 # copy env and create conda env
 COPY environment.yml /app/

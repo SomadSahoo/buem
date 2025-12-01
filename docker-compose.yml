@@ -8,6 +8,7 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - BUEM_WEATHER_DIR=/app/data/weather
+      - BUEM_CBC_EXE=/opt/conda/envs/buem_env/bin/cbc
     ports:
       - "5000:5000"
     volumes:

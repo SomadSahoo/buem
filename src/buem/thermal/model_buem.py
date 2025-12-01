@@ -165,28 +165,47 @@ class ModelBUEM(object):
                 self.bH[comp_name] = {"Original": self.bU[comp_name] * total_area * b_trans / 1000.0}
         else:
             # legacy flat config: build minimal component_elements for compatibility
-            # Walls, Roof, Floor based on A_* and U_* keys
-            for comp in ["Walls", "Roof", "Floor", "Windows", "Ventilation"]:
+            # Walls, Roof, Floor, Windows, Doors based on A_* and U_* keys; Ventilation handled separately
+            for comp in ["Walls", "Roof", "Floor", "Windows", "Doors", "Ventilation"]:
                 elems = []
                 # search for keys A_<Comp>_n or A_<Comp> keys
-                # Try A_<Comp>_1, A_<Comp>_2 pattern
                 i = 1
                 found = False
                 while True:
-                    key = f"A_{comp}_{i}"
-                    if key in self.cfg:
+                    key_n = f"A_{comp}_{i}"
+                    if key_n in self.cfg:
                         found = True
-                        elems.append({"id": f"{comp}_{i}", "area": float(self.cfg.get(key, 100.0))})
+                        elems.append({"id": f"{comp}_{i}", "area": float(self.cfg.get(key_n, 100.0))})
                         i += 1
                     else:
                         break
+                # fallback single-area key A_<Comp>
                 if not found and f"A_{comp}" in self.cfg:
-                    elems.append({"id": f"{comp}_1", "area": float(self.cfg.get(key, 100.0))})
+                    elems.append({"id": f"{comp}_1", "area": float(self.cfg.get(f"A_{comp}", 100.0))})
                 self.component_elements[comp] = elems
-                # component-level U fallback
-                self.bU[comp] = float(self.cfg.get(f"U_{comp}"))
-                total_area = sum(e["area"] for e in elems)
+
+                # Ventilation: do not treat as opaque component with U-value here;
+                # ventilation conductance is computed later from infiltration parameters.
+                if comp == "Ventilation":
+                    continue
+
+                # Read component-level U value defensively (legacy flat config)
+                raw_u = self.cfg.get(f"U_{comp}", None)
+                if raw_u is None:
+                    # avoid crash; use 0.0 and warn (validator should flag missing U values earlier)
+                    print(f"[WARN] U_{comp} not found in legacy cfg; using U_{comp}=0.0 (this may affect results).")
+                    u_val = 0.0
+                else:
+                    try:
+                        u_val = float(raw_u)
+                    except Exception:
+                        print(f"[WARN] Invalid U_{comp} value ({raw_u}); using U_{comp}=0.0")
+                        u_val = 0.0
+                self.bU[comp] = u_val
+
+                total_area = sum(e["area"] for e in elems) if elems else 0.0
                 b_trans = float(self.cfg.get(f"b_Transmission_{comp}_1", 1.0))
+                # aggregated conductance [kW/K] (U [W/m2K] * area [m2] -> W/K -> kW/K)
                 self.bH[comp] = {"Original": self.bU[comp] * total_area * b_trans / 1000.0}
 
         # build helper lists and windows element list
@@ -300,29 +319,16 @@ class ModelBUEM(object):
         
         self.profiles["bQ_sol_Windows"] = np.sum(np.vstack(win_list), axis=0) if win_list else np.zeros(len(self.times))
 
-        # thermal sky loss for windows (use H_windows if available, else total area-based fallback)
         H_windows = self.bH.get("Windows", {}).get("Original", 0.0)
-        if H_windows > 0:
-            thermal_rad_win = H_windows * self.bConst["h_r"] * self.bConst["R_se"] * self.bConst["delta_T_sky"]
-        else:
-            total_window_area = sum(float(w.get("area", 0.0)) for w in self.windows)      
-            U_win = self.bU.get("Windows", float(self.cfg.get("U_Window", 0.0)))
-            # U_win likely in W/m2/K -> convert to kW/m2/K for consistent units when needed
-            thermal_rad_win = (
-                total_window_area
-                * self.bConst["h_r"]
-                * (U_win/1000)
-                * self.bConst["R_se"]
-                * self.bConst["delta_T_sky"]
-            )
-        # ensure thermal_rad_win is kW and subtract
+        # sol-air style longwave/sky correction for windows expressed as kW (H_windows in kW/K)
+        thermal_rad_win = H_windows * self.bConst["h_r"] * self.bConst["R_se"] * self.bConst["delta_T_sky"]
         self.profiles["bQ_sol_Windows"] = self.profiles["bQ_sol_Windows"] - float(thermal_rad_win)
 
         # OPAQUE: Walls and Roof (use element POA * area * alpha * shading)
         wall_q = []
         for e in self.component_elements.get("Walls", []):
             eid = e.get("id")
-            area = float(e.get("area", 0.0))
+            area = float(e.get("area", 50.0))
             poa = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
             wall_q.append(area * alpha * self.F_sh_vert * poa)
         self.profiles["bQ_sol_Walls"] = np.sum(np.vstack(wall_q), axis=0) if wall_q else np.zeros(len(self.times))
@@ -330,12 +336,12 @@ class ModelBUEM(object):
         roof_q = []
         for e in self.component_elements.get("Roof", []):
             eid = e.get("id")
-            area = float(e.get("area", 0.0))
+            area = float(e.get("area", 20.0))
             poa = self._irrad_surf[eid].values if eid in self._irrad_surf.columns else (self.cfg["weather"]["GHI"].values / 1000.0)
             roof_q.append(area * alpha * self.F_sh_hor * poa)
         self.profiles["bQ_sol_Roof"] = np.sum(np.vstack(roof_q), axis=0) if roof_q else np.zeros(len(self.times))
 
-        self.profiles["bQ_sol_Floor"] = np.zeros(len(self.times))
+        self.profiles["bQ_sol_Floor"] = np.zeros(len(self.times)) # floor solar gains is zero
         self.profiles["bQ_sol_Opaque"] = self.profiles["bQ_sol_Walls"] + self.profiles["bQ_sol_Roof"] + self.profiles["bQ_sol_Floor"]
 
         # provide debug sums (kWh per timestep is kW * 1h)
@@ -548,6 +554,16 @@ class ModelBUEM(object):
         Q_opaque_profile = np.asarray(self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times))))
         Q_ig_profile = np.asarray(self.profiles.get("bQ_ig", np.zeros(len(self.times))))
 
+        # prepare element lists for per-component POA weighting (used for sol-air)
+        wall_elems = self.component_elements.get("Walls", [])
+        roof_elems = self.component_elements.get("Roof", [])
+        total_wall_area = float(np.sum([float(e.get("area", 0.0)) for e in wall_elems])) if wall_elems else 0.0
+        total_roof_area = float(np.sum([float(e.get("area", 0.0)) for e in roof_elems])) if roof_elems else 0.0
+        # external convective/radiative coefficient (W/m2/K) for sol-air; configurable via cfg["h_o"]
+        h_o = float(self.cfg.get("h_o", 25.0))
+        h_o_kW = max(1e-6, h_o / 1000.0)   # convert to kW/m2/K
+
+
         # arrays for milp_meta
         Q_air_list = np.zeros(n)
         Q_surface_list = np.zeros(n)
@@ -557,6 +573,31 @@ class ModelBUEM(object):
         for i, (t1, t2) in enumerate(self.timeIndex):
             Q_sol_win = float(Q_win_profile[i])
             Q_sol_opaque = float(Q_opaque_profile[i])
+
+            # --- area-weighted POA for opaque components (kW/m2) ---
+            poa_wall = 0.0
+            if total_wall_area > 0:
+                s = 0.0
+                for e in wall_elems:
+                    eid = e.get("id")
+                    if eid in self._irrad_surf.columns:
+                        poa_elem = float(self._irrad_surf.at[self.times[i], eid])
+                    else:
+                        poa_elem = float(self.cfg["weather"]["GHI"].iloc[i]) / 1000.0
+                    s += float(e.get("area", 0.0)) * poa_elem
+                poa_wall = s / total_wall_area
+
+            poa_roof = 0.0
+            if total_roof_area > 0:
+                s = 0.0
+                for e in roof_elems:
+                    eid = e.get("id")
+                    if eid in self._irrad_surf.columns:
+                        poa_elem = float(self._irrad_surf.at[self.times[i], eid])
+                    else:
+                        poa_elem = float(self.cfg["weather"]["GHI"].iloc[i]) / 1000.0
+                    s += float(e.get("area", 0.0)) * poa_elem
+                poa_roof = s / total_roof_area
 
             # internal gains and occupancy
             if isinstance(self.profiles.get("occ_nothome"), dict):
@@ -573,6 +614,21 @@ class ModelBUEM(object):
             # split solar gains: 50% to air, 50% to surface (ISO simplification)
             Q_air = Q_ia + 0.5 * Q_sol_win
             Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
+
+            # --- sol-air based equivalent contribution from opaque surfaces (linear known term) ---
+            extra_from_walls = 0.0
+            if total_wall_area > 0 and H_walls > 0:
+                poa_wall_eff = poa_wall * getattr(self, "F_sh_vert", 1.0)
+                extra_from_walls = H_walls * (self.bConst.get("alpha", 0.6) * poa_wall_eff / h_o_kW)
+
+            extra_from_roofs = 0.0
+            if total_roof_area > 0 and H_roofs > 0:
+                poa_roof_eff = poa_roof * getattr(self, "F_sh_hor", 1.0)
+                extra_from_roofs = H_roofs * (self.bConst.get("alpha", 0.6) * poa_roof_eff / h_o_kW)
+
+            # add sol-air contributions into surface RHS (remains linear)
+            Q_surface = Q_surface + extra_from_walls + extra_from_roofs
+
 
             # store for MILP meta
             Q_air_list[i] = Q_air

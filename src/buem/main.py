@@ -70,7 +70,7 @@ def run_model(cfg_dict, plot: bool = False, use_milp: bool = False):
 
 
 def main():
-    res = run_model(cfg, plot=True, use_milp=True)
+    res = run_model(cfg, plot=True, use_milp=False)
 
     heating = res["heating"]
     cooling = res["cooling"]
@@ -98,9 +98,9 @@ def main():
     # p1.join()
     # p2.join()
 
-    print(f"Heating load total: {res['heating'].sum()}")
+    print(f"Heating load total: {res['heating'].sum()} kWh")
 
-    print(f"Cooling load total: {res['cooling'].sum()}")
+    print(f"Cooling load total: {res['cooling'].sum()} kWh")
 
     # Combine results for plotting, using one model as base
     # model_heat.cooling_load = cooling_load
