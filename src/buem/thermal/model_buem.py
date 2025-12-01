@@ -8,6 +8,7 @@ import os
 import shutil
 import platform
 from dotenv import load_dotenv
+from buem.config.validator import validate_cfg
 
 class ModelBUEM(object):
     """
@@ -990,6 +991,10 @@ class ModelBUEM(object):
         String: comfort_mode: default = "heating"
         Boolean: use_milp: default = False
         """
+        # runtime validation of incoming cfg to fail fast for missing/invalid attributes
+        issues = validate_cfg(self.cfg)
+        if issues:
+            raise ValueError("Configuration validation failed: " + "; ".join(issues))
 
         # prepare parameters and profiles
         self._initPara()

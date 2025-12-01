@@ -56,6 +56,11 @@ def run_building_model():
         current_app.logger.info("Model run completed, points=%d elapsed=%.3fs", len(times), result["meta"]["elapsed_s"])
         return jsonify({"status": "ok", "result": result}), 200
 
+    except ValueError as ve:
+        # validation or other expected errors -> return 400
+        current_app.logger.warning("Validation error: %s", str(ve))
+        return jsonify({"status": "error", "error": "validation_failed", "message": str(ve)}), 400
+
     except Exception as exc:
         current_app.logger.exception("API run failed")
         return jsonify({"status": "error", "error": str(exc), "trace": traceback.format_exc()}), 500
