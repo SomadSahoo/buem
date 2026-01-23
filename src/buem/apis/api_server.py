@@ -4,25 +4,40 @@ import os
 from logging.handlers import RotatingFileHandler
 
 from buem.apis.model_api import bp as model_bp
+from buem.apis.files_api import bp as files_bp 
 
-LOG_FILE = "/app/logs/buem_api.log"
+# prefer env var; fallback to project-local path for Windows
+LOG_FILE = os.environ.get("BUEM_LOG_FILE", r"C:\\test\\buem\\src\\buem\\logs\\buem_api.log")
 
 def create_app():
     app = Flask(__name__)
     app.register_blueprint(model_bp)
+    app.register_blueprint(files_bp)  # register files endpoint
 
     # centralized logging - rotates to limit disk usage
-    if not os.path.exists(os.path.dirname(LOG_FILE)):
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    logdir = os.path.dirname(LOG_FILE)
+    if logdir and not os.path.exists(logdir):
+        os.makedirs(logdir, exist_ok=True)
     handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     handler.setFormatter(formatter)
-    handler.setLevel(logging.INFO)
-    app.logger.setLevel(logging.INFO)
+    handler.setLevel(logging.DEBUG)
+
+    # set app logger to DEBUG in dev; production can override via env
+    app.logger.setLevel(logging.DEBUG)
     app.logger.addHandler(handler)
 
-    # also configure root logger to propagate to handlers (optional)
-    logging.getLogger().addHandler(handler)
+    # configure root logger and Werkzeug (HTTP request) logger to use same handler
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    # avoid duplicate handlers if already attached
+    if handler not in root_logger.handlers:
+        root_logger.addHandler(handler)
+
+    werk_logger = logging.getLogger('werkzeug')
+    werk_logger.setLevel(logging.DEBUG)
+    if handler not in werk_logger.handlers:
+        werk_logger.addHandler(handler)
 
     @app.route("/api/health", methods=["GET"])
     def health():

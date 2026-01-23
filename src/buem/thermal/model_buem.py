@@ -132,89 +132,111 @@ class ModelBUEM(object):
 
     def _initEnvelop(self):
         """
-        Parse cfg['components'] or fallback legacy keys.
-        - Populate self.component_elements: component -> list of {id, area, azimuth, tilt, ...}
-        - Populate component-level U in self.bU
-        - Compute aggregated conductance self.bH[component]['Original'] = U * sum(area) * b_trans / 1000 (kW/K)
-        - Compute ventilation conductance and include under 'Ventilation'
+        Parse structured cfg['components'] and populate:
+          - self.component_elements (dict)
+          - self.bU (component-level U)
+          - self.bH (aggregated conductances)
+        Raises ValueError if components are missing or invalid.
         """
         comps = self.cfg.get("components")
-        if isinstance(comps, dict) and comps:
-            # structured component tree provided
-            for comp_name, comp_data in comps.items():
-                elems = comp_data.get("elements", [])
-                parsed = []
-                for e in elems:
-                    parsed.append(
-                        {
-                            "id": e.get("id"),
-                            "area": float(e.get("area", 0.0)),
-                            "azimuth": float(e["azimuth"]) if e.get("azimuth") is not None else None,
-                            "tilt": float(e["tilt"]) if e.get("tilt") is not None else None,
-                            # preserve other properties (e.g., surface mapping for windows)
-                            **{k: v for k, v in e.items() if k not in ("id", "area", "azimuth", "tilt")}
-                        }
-                    )
-                self.component_elements[comp_name] = parsed
 
-                # component U
-                self.bU[comp_name] = float(comp_data.get("U", self.cfg.get(f"U_{comp_name}", 0.0)))
-                
-                # transmission factor (optional)
-                b_trans = float(comp_data.get("b_transmission", comp_data.get("b_transmission", 1.0)))
-                total_area = sum(e["area"] for e in parsed)
-                self.bH[comp_name] = {"Original": self.bU[comp_name] * total_area * b_trans / 1000.0}
-        else:
-            # legacy flat config: build minimal component_elements for compatibility
-            # Walls, Roof, Floor, Windows, Doors based on A_* and U_* keys; Ventilation handled separately
-            for comp in ["Walls", "Roof", "Floor", "Windows", "Doors", "Ventilation"]:
+        # If components missing or not a dict -> attempt legacy fallback (A_<Comp> keys)
+        if not isinstance(comps, dict) or not comps:
+            constructed = {}
+            had_any = False
+            for comp in ("Walls", "Roof", "Floor", "Windows", "Doors"):
                 elems = []
-                # search for keys A_<Comp>_n or A_<Comp> keys
                 i = 1
-                found = False
                 while True:
-                    key_n = f"A_{comp}_{i}"
-                    if key_n in self.cfg:
-                        found = True
-                        elems.append({"id": f"{comp}_{i}", "area": float(self.cfg.get(key_n, 100.0))})
+                    keyn = f"A_{comp}_{i}"
+                    if keyn in self.cfg:
+                        had_any = True
+                        elems.append({"id": f"{comp}_{i}", "area": float(self.cfg.get(keyn, 0.0))})
                         i += 1
                     else:
                         break
-                # fallback single-area key A_<Comp>
-                if not found and f"A_{comp}" in self.cfg:
-                    elems.append({"id": f"{comp}_1", "area": float(self.cfg.get(f"A_{comp}", 100.0))})
-                self.component_elements[comp] = elems
+                if not elems and f"A_{comp}" in self.cfg:
+                    had_any = True
+                    elems.append({"id": f"{comp}_1", "area": float(self.cfg.get(f"A_{comp}", 0.0))})
+                if elems:
+                    # keep U as-is (may be None) and let the same processing logic handle it
+                    constructed[comp] = {"U": self.cfg.get(f"U_{comp}"), "elements": elems}
 
-                # Ventilation: do not treat as opaque component with U-value here;
-                # ventilation conductance is computed later from infiltration parameters.
-                if comp == "Ventilation":
-                    continue
+            if had_any:
+                # adopt constructed components for backward compatibility
+                comps = constructed
+                self.cfg["components"] = constructed
+            else:
+                # No structured components and no legacy area keys -> fail early
+                raise ValueError("Configuration missing 'components' tree and no legacy A_<Comp> keys found.")
 
-                # Read component-level U value defensively (legacy flat config)
-                raw_u = self.cfg.get(f"U_{comp}", None)
-                if raw_u is None:
-                    # avoid crash; use 0.0 and warn (validator should flag missing U values earlier)
-                    print(f"[WARN] U_{comp} not found in legacy cfg; using U_{comp}=0.0 (this may affect results).")
-                    u_val = 0.0
+        # Now 'comps' is a dict (either originally provided or constructed)
+        self.component_elements = {}
+        self.bU = {}
+        self.bH = {}
+
+        for comp_name, comp_data in comps.items():
+            if not isinstance(comp_data, dict):
+                raise ValueError(f"components.{comp_name} must be an object")
+            elems = comp_data.get("elements", [])
+            if not isinstance(elems, list):
+                raise ValueError(f"components.{comp_name}.elements must be a list")
+            parsed = []
+            for e in elems:
+                parsed.append({
+                    "id": e.get("id"),
+                    "area": float(e.get("area", 0.0)),
+                    "azimuth": float(e["azimuth"]) if e.get("azimuth") is not None else None,
+                    "tilt": float(e["tilt"]) if e.get("tilt") is not None else None,
+                    **{k: v for k, v in e.items() if k not in ("id", "area", "azimuth", "tilt")}
+                })
+            self.component_elements[comp_name] = parsed
+
+            # Ventilation is not a physical surface with U-values per element;
+            # its aggregated conductance is computed from infiltration rates below.
+            # If a 'Ventilation' component is present, skip the element/U requirement.
+            if comp_name.lower() == "ventilation":
+                self.component_elements[comp_name] = []  # no surface elements
+                self.bU[comp_name] = None
+                # ensure a placeholder so other code won't KeyError; H_ve is set later
+                self.bH.setdefault(comp_name, {})
+                continue
+
+            # Aggregated conductance: prefer component-level U, otherwise require per-element U
+            b_trans = float(comp_data.get("b_transmission", 1.0))
+            total_area = sum(e["area"] for e in parsed)
+
+            u_val = comp_data.get("U")
+            if u_val is None:
+                # No component-level U provided -> require per-element U for all elements
+                if parsed and all(e.get("U") is not None for e in parsed):
+                    total_conductance = 0.0
+                    for e in parsed:
+                        try:
+                            total_conductance += float(e.get("U")) * float(e.get("area", 0.0))
+                        except Exception:
+                            raise ValueError(f"components.{comp_name}.elements contains invalid U for element {e.get('id')}")
+                    # store None to indicate per-element U was used; bH uses computed conductance (kW/K)
+                    self.bU[comp_name] = None
+                    self.bH[comp_name] = {"Original": total_conductance / 1000.0}
                 else:
-                    try:
-                        u_val = float(raw_u)
-                    except Exception:
-                        print(f"[WARN] Invalid U_{comp} value ({raw_u}); using U_{comp}=0.0")
-                        u_val = 0.0
-                self.bU[comp] = u_val
-
-                total_area = sum(e["area"] for e in elems) if elems else 0.0
-                b_trans = float(self.cfg.get(f"b_Transmission_{comp}_1", 1.0))
-                # aggregated conductance [kW/K] (U [W/m2K] * area [m2] -> W/K -> kW/K)
-                self.bH[comp] = {"Original": self.bU[comp] * total_area * b_trans / 1000.0}
+                    # neither component-level U nor all elements have per-element U -> fail early
+                    raise ValueError(
+                        f"components.{comp_name} missing component U and not all elements provide per-element U. "
+                        "Provide 'U' at the component level or 'U' for every element."
+                    )
+            else:
+                try:
+                    self.bU[comp_name] = float(u_val)
+                except Exception:
+                    raise ValueError(f"components.{comp_name}.U invalid: {u_val}")
+                self.bH[comp_name] = {"Original": self.bU[comp_name] * total_area * b_trans / 1000.0}
 
         # build helper lists and windows element list
         self.walls = [e["id"] for e in self.component_elements.get("Walls", [])]
         self.roofs = [e["id"] for e in self.component_elements.get("Roof", [])]
         self.floors = [e["id"] for e in self.component_elements.get("Floor", [])]
         self.windows = self.component_elements.get("Windows", [])
-
 
         # ventilation aggregated conductance (kW/K)
         A_ref = self._cfg_float("A_ref", 1.0)

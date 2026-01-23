@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "buem"
-version = "0.1.1"
+version = "0.1.2"
 description = "Building energy model for analysis of hourly thermal load(ISO 52019-1:2017, 5R1C)"
 authors = [
     { name="Somadutta Sahoo", email="s.sahoo@uu.nl" }
@@ -20,12 +20,12 @@ dependencies = [
     "scipy",
     "sympy",
     "openpyxl",
-    "cvxpy"
-    "flask"
-    "python-dotenv"
-    "gunicorn"
-    "coincbc"
-    "pulp"
+    "cvxpy",
+    "flask",
+    "python-dotenv",
+    "gunicorn",
+    "coincbc",
+    "pulp",
 ]
 keywords = [
     "building",

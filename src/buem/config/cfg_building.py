@@ -211,18 +211,26 @@ class CfgBuilding:
       - New attributes present in input are preserved and included in outputs.
     """
 
-    def __init__(self, json_str: str):
+    def __init__(self, json_input):
         """
-        Initialize CfgBuilding from a JSON string.
+        Initialize CfgBuilding from either:
+          - a Python dict (preferred when caller already has pandas objects), or
+          - a non-empty JSON string (backwards compatible).
+        """
+        # Accept dict directly (preserves pandas objects) or a JSON string
+        if isinstance(json_input, dict):
+            parsed = json_input
+        elif isinstance(json_input, str):
+            if not json_input.strip():
+                raise ValueError("CfgBuilding requires a non-empty JSON string on initialization.")
+            parsed = json.loads(json_input)
+        else:
+            raise ValueError("CfgBuilding requires a dict or non-empty JSON string on initialization.")
 
-        Raises:
-          ValueError: if json_str is empty or not a string.
-        """
-        if not isinstance(json_str, str) or not json_str.strip():
-            raise ValueError("CfgBuilding requires a non-empty JSON string on initialization.")
-        parsed = json.loads(json_str)
         # ensure all attributes are present (fill missing from specs)
         parsed_filled = self._ensure_and_normalize_input(parsed)
+        # keep normalized input available for building the internal cfg (includes 'components')
+        self._parsed_filled = parsed_filled
 
         # Extract categories
         weather_input = parsed_filled.get("weather")
@@ -264,22 +272,63 @@ class CfgBuilding:
         return out
 
     def _build_internal_cfg(self):
-        """Merge weather, boolean and fixed components into a single internal dict."""
+        """Merge weather, boolean, fixed and other attributes into a single internal dict."""
         cfg: Dict[str, Any] = {}
+        # weather as DataFrame
         cfg["weather"] = self.weather.df
+        # booleans and fixed attributes
         cfg.update(self.booleans.as_dict())
         cfg.update(self.fixed.as_dict())
-        # include any attributes added dynamically in fixed._data or booleans._data automatically
+
+        # include other attributes from ATTRIBUTE_SPECS that are not in WEATHER/BOOLEAN/FIXED
+        # (e.g., 'components' and other "OTHER" category attributes)
+        for name, spec in ATTRIBUTE_SPECS.items():
+            if spec.category not in (AttributeCategory.WEATHER, AttributeCategory.BOOLEAN, AttributeCategory.FIXED):
+                # prefer value from the originally-parsed input (self._parsed_filled),
+                # which already contains defaults if the caller omitted them.
+                try:
+                    cfg[name] = copy.deepcopy(self._parsed_filled.get(name))
+                except Exception:
+                    # fallback: use the spec default if anything goes wrong
+                    cfg[name] = copy.deepcopy(spec.default)
+
+        # include any dynamically added items present in fixed._data (already added via update),
+        # leave _cfg on the instance
         self._cfg = cfg
 
     def to_cfg_dict(self) -> Dict[str, Any]:
         """
-        Return configuration dict compatible with legacy code (ModelBuEM).
+        Return configuration dict using the canonical structured representation.
 
-        Weather is returned as a pandas.DataFrame and series preserved as pd.Series.
+        Returns a deep copy of the internal cfg where:
+         - 'weather' is a pandas.DataFrame
+         - 'components' is the structured tree (dict)
+         - if 'A_ref' is not present but components are present, A_ref is derived
         """
         self._build_internal_cfg()
-        return copy.deepcopy(self._cfg)
+        cfg = copy.deepcopy(self._cfg)
+
+        # Ensure components is present and compute A_ref if missing
+        comps = cfg.get("components")
+        if not isinstance(comps, dict) or not comps:
+            # structured components are required for the cleaned codebase
+            # return cfg as-is; downstream code (validate_cfg) will enforce presence
+            return cfg
+
+        # compute aggregated A_ref if absent
+        if "A_ref" not in cfg:
+            total_area = 0.0
+            for comp_data in comps.values():
+                if isinstance(comp_data, dict):
+                    for e in comp_data.get("elements", []):
+                        try:
+                            total_area += float(e.get("area", 0.0))
+                        except Exception:
+                            pass
+            if total_area > 0:
+                cfg["A_ref"] = total_area
+
+        return cfg
 
     def to_json(self) -> str:
         """

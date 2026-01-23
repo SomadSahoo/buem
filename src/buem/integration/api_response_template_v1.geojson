@@ -1,0 +1,80 @@
+{
+  "type": "FeatureCollection",
+  "timeStamp": "<timestamp>",
+  "numberMatched": <count>,
+  "numberReturned": <count>,
+
+  "features": [
+    {
+      "type": "Feature",
+      "id": "<building_id_1>",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [ <lon_1>, <lat_1> ]
+      },
+      "properties": {
+        "buem": {
+          "building_attributes": {
+            /* attributes for building 1 */
+          },
+
+          "child_components": [
+            {
+              "component_id": "<id>",
+              "component_type": "<wall|roof|window|...>",
+              "area_m2": <number>,
+              "orientation_deg": <number>,
+              "tilt_deg": <number>
+            }
+            /* ... more components ... */
+          ],
+
+          "thermal_load_profile": {
+            "start_time": "<ISO timestamp>",
+            "end_time": "<ISO timestamp>",
+            "heat": [ /* numeric array */ ],
+            "cool": [ /* numeric array */ ],
+            "electricity": [ /* numeric array */ ]
+          }
+        }
+      }
+    },
+
+    {
+      "type": "Feature",
+      "id": "<building_id_2>",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [ <lon_2>, <lat_2> ]
+      },
+      "properties": {
+        "buem": {
+          "building_attributes": {
+            /* attributes for building 2 */
+          },
+
+          "child_components": [
+            {
+              "component_id": "<id>",
+              "component_type": "<wall|roof|window|...>",
+              "area_m2": <number>,
+              "orientation_deg": <number>,
+              "tilt_deg": <number>
+            }
+            /* ... more components ... */
+          ],
+
+          "thermal_load_profile": {
+            "start_time": "<ISO timestamp>",
+            "end_time": "<ISO timestamp>",
+            "heat": [ /* numeric array */ ],
+            "cool": [ /* numeric array */ ],
+            "electricity": [ /* numeric array */ ]
+          }
+        }
+      }
+    }
+
+    /* ... N more buildings ... */
+  ]
+}

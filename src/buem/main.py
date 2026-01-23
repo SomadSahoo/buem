@@ -2,7 +2,9 @@ import time
 from buem.thermal.model_buem import ModelBUEM
 from buem.results.standard_plots import PlotVariables as pvar
 from buem.config.cfg_attribute import cfg
+from buem.config.validator import validate_cfg
 import numpy as np
+import sys
 
 # from multiprocessing import Process, Manager
 
@@ -15,62 +17,109 @@ import numpy as np
 #         return_dict['model_cool'] = model
 
 
-def run_model(cfg_dict, plot: bool = False, use_milp: bool = False):
+def run_model(cfg_dict, plot: bool = False, use_milp: bool = False, return_models: bool = False, fill_missing_components: bool = False):
     """
     Run ModelBUEM for heating and cooling and return results.
-    Returns dict: {"times": DatetimeIndex, "heating": pd.Series, "cooling": pd.Series}
-    """
-    starttime = time.time()
 
-    if use_milp:
-        model = ModelBUEM(cfg_dict)
-        model.sim_model(use_inequality_constraints=True, comfort_mode="heating", use_milp=True)
-        heating_load = model.heating_load.copy()
-        cooling_load = model.cooling_load.copy()
-        elapsed = time.time() - starttime
-        return {
-            "times": model.times,
+    Parameters
+    ----------
+    cfg_dict : dict
+        Normalized configuration dictionary accepted by ModelBUEM.
+    plot : bool, optional
+        If True, attempt to plot results (best-effort).
+    use_milp : bool, optional
+        If True attempt the MILP solver path.
+    return_models : bool, optional
+        If True the returned dict will include "model_heat" and "model_cool" objects.
+    fill_missing_components : bool, optional
+        If True, attempt to auto-create empty lists for missing components
+        (e.g. components.Doors) to allow quick test runs. Use with caution.
+    """
+    start_time = time.time()
+
+    if cfg_dict is None:
+        raise ValueError("cfg_dict must be provided to run_model")
+
+    # Pre-validate configuration and optionally fill missing component lists
+    issues = validate_cfg(cfg_dict)
+    if issues:
+        if fill_missing_components:
+            comps = cfg_dict.setdefault("components", {})
+            for k in ("Doors", "Windows", "Walls", "Floor", "Roof"):
+                if k not in comps:
+                    comps[k] = []
+            issues = validate_cfg(cfg_dict)  # re-validate after filling defaults
+
+        if issues:
+            # fail early with clear message
+            raise ValueError("Configuration validation failed: " + "; ".join(issues))
+
+    try:
+        if use_milp:
+            # Try MILP solver path once. Expect ModelBUEM to set both heating_load and cooling_load.
+            model = ModelBUEM(cfg_dict)
+            model.sim_model(use_inequality_constraints=True, comfort_mode="heating", use_milp=True)
+            if not hasattr(model, "heating_load") or not hasattr(model, "cooling_load"):
+                raise RuntimeError("MILP run did not produce heating and/or cooling arrays")
+            heating_load = model.heating_load.copy()
+            cooling_load = model.cooling_load.copy()
+            elapsed = time.time() - start_time
+
+            out = {
+                "times": model.times,
+                "heating": heating_load,
+                "cooling": cooling_load,
+                "elapsed_s": elapsed,
+            }
+            if return_models:
+                out["model_heat"] = model
+                out["model_cool"] = model
+            return out
+
+        # Non-MILP: run two deterministic simulations (heating then cooling)
+        model_heat = ModelBUEM(cfg_dict)
+        model_heat.sim_model(use_inequality_constraints=False, comfort_mode="heating", use_milp=False)
+        heating_load = model_heat.heating_load.copy()
+
+        model_cool = ModelBUEM(cfg_dict)
+        model_cool.sim_model(use_inequality_constraints=False, comfort_mode="cooling", use_milp=False)
+        cooling_load = model_cool.cooling_load.copy()
+
+        elapsed = time.time() - start_time
+
+        if plot:
+            try:
+                plotter = pvar()
+                plotter.plot_variables(model_heat, model_cool, period='year')
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
+        out = {
+            "times": model_heat.times,
             "heating": heating_load,
             "cooling": cooling_load,
             "elapsed_s": elapsed,
-            "model_heat": model,
-            "model_cool": model,
         }
-    
-    # model run for heating
-    model_heat = ModelBUEM(cfg_dict)
-    model_heat.sim_model(use_inequality_constraints=False, comfort_mode="heating", use_milp=False)
-    heating_load = model_heat.heating_load.copy()
-    
-    # model run for cooling
-    model_cool = ModelBUEM(cfg_dict)
-    model_cool.sim_model(use_inequality_constraints=False, comfort_mode="cooling", use_milp=False)
-    cooling_load = model_cool.cooling_load.copy()
-    elapsed = time.time() - starttime
+        if return_models:
+            out["model_heat"] = model_heat
+            out["model_cool"] = model_cool
+        return out
 
-
-    if plot:
-        try:
-            plotter = pvar()
-            plotter.plot_variables(model_heat, model_cool, period='year')
-        except Exception as e:
-            import traceback
-            print("Plotting failed: ", str(e))
-            traceback.print_exc()
-
-    # include model objects for diagnostics
-    return {
-        "times": model_heat.times, 
-        "heating": heating_load, 
-        "cooling": cooling_load, 
-        "elapsed_s": elapsed,
-        "model_heat": model_heat,
-        "model_cool": model_cool
-        }
-
+    except Exception as exc:
+        raise RuntimeError(f"Model run failed: {exc}") from exc
 
 def main():
-    res = run_model(cfg, plot=True, use_milp=False)
+    try:
+        # consider enabling fill_missing_components=True for quick ad-hoc runs
+        res = run_model(cfg, plot=True, use_milp=False, fill_missing_components=False)
+    except ValueError as ve:
+        # config validation problems are common; show clear message and exit non-zero
+        print("Configuration validation error:", ve)
+        sys.exit(2)
+    except RuntimeError as re:
+        print("Model execution error:", re)
+        sys.exit(3)
 
     heating = res["heating"]
     cooling = res["cooling"]

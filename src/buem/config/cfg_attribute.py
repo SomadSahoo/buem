@@ -108,14 +108,14 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
                 "U": 1.61,
                 "b_transmission": 1.0,
                 "elements": [
-                    {"id": "Wall_1", "area": 200.0, "azimuth": 0.0, "tilt": 00.0},
-                    {"id": "Wall_2", "area": 150.0, "azimuth": 90.0, "tilt": 00.0},
+                    {"id": "Wall_1", "area": 1226.9, "azimuth": 0.0, "tilt": 00.0},
+                     {"id": "Wall_2", "area": 2000, "azimuth": 90.0, "tilt": 00.0},
                 ],
             },
             "Roof": {
                 "U": 1.54,
                 "elements": [
-                    {"id": "Roof_1", "area": 120.0, "azimuth": 135.0, "tilt": 30.0},
+                    {"id": "Roof_1", "area": 497.7, "azimuth": 135.0, "tilt": 30.0},
                 ],
             },
             "Floor": {"U": 1.72, "elements": [{"id": "Floor_1", "area": 469.0, "azimuth": 180.0, "tilt": 90.0}]},
@@ -123,27 +123,20 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
                 "U": 5.2,
                 "g_gl": 0.5,
                 "elements": [
-                    {"id": "Win_1", "area": 5.0, "surface": "Wall_1", "azimuth": 0.0, "tilt": 0.0},
-                    {"id": "Win_2", "area": 5.0, "surface": "Wall_2", "azimuth": 90.0, "tilt": 0.0},
+                    {"id": "Win_1", "area": 78.4, "surface": "Wall_1", "azimuth": 0.0, "tilt": 0.0},
+                    {"id": "Win_2", "area": 347.2, "surface": "Wall_2", "azimuth": 90.0, "tilt": 0.0},
                 ],
+            },
+            "Doors": {
+                "U": 3.5,
+                "elements": [
+                    {"id": "Door_1", "area": 58.8, "surface": "Wall_1", "azimuth": 0.0, "tilt": 90.0}
+                ]
             },
             "Ventilation": {"elements": [{"id": "Vent_1", "air_changes": 0.5}]},
         },
         doc="Structured component tree. Component-level 'U' applies to all elements; elements list carries per-surface geometry and area."
     ),
-    "A_Roof_1": AttributeSpec("A_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 497.7),
-    "U_Roof_1": AttributeSpec("U_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.54),
-    "b_Transmission_Roof_1": AttributeSpec("b_Transmission_Roof_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.0),
-    "A_Wall_1": AttributeSpec("A_Wall_1", AttributeCategory.FIXED, AttrType.FLOAT, 1226.9),
-    "U_Wall_1": AttributeSpec("U_Wall_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.61),
-    "b_Transmission_Wall_1": AttributeSpec("b_Transmission_Wall_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.0),
-    "A_Floor_1": AttributeSpec("A_Floor_1", AttributeCategory.FIXED, AttrType.FLOAT, 469.0),
-    "U_Floor_1": AttributeSpec("U_Floor_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.72),
-    "b_Transmission_Floor_1": AttributeSpec("b_Transmission_Floor_1", AttributeCategory.FIXED, AttrType.FLOAT, 1.0),
-    "A_Window": AttributeSpec("A_Window", AttributeCategory.FIXED, AttrType.FLOAT, 78.4),
-    "U_Window": AttributeSpec("U_Window", AttributeCategory.FIXED, AttrType.FLOAT, 5.2),
-    "A_Door_1": AttributeSpec("A_Door_1", AttributeCategory.FIXED, AttrType.FLOAT, 58.8),
-    "U_Door_1": AttributeSpec("U_Door_1", AttributeCategory.FIXED, AttrType.FLOAT, 3.5),
     "A_ref": AttributeSpec("A_ref", AttributeCategory.FIXED, AttrType.FLOAT, 2064),
     "h_room": AttributeSpec("h_room", AttributeCategory.FIXED, AttrType.FLOAT, 2.5),
     "n_air_infiltration": AttributeSpec("n_air_infiltration", AttributeCategory.FIXED, AttrType.FLOAT, 0.5),

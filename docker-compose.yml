@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: buem-api
+    env_file: .env
     working_dir: /app
     environment:
       - PYTHONPATH=/app/src
@@ -16,7 +17,7 @@ services:
       - ./src/buem/logs:/app/logs:rw
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

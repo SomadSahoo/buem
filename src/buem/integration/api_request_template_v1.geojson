@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "timeStamp": "<ISO timestamp>",
+  "numberMatched": <count>,
+  "numberReturned": <count>,
+  "features": [
+    {
+      "type": "Feature",
+      "id": "<building_id_1>",
+      "geometry": { "type": "Point", "coordinates": [ <lon_1>, <lat_1> ] },
+      "properties": {
+        "buem": {
+          "building_attributes": {
+             /* structured BUEM attributes including 'components' */
+          }
+        }
+      }
+    }
+  ]
+}

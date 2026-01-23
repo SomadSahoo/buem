@@ -1,0 +1,34 @@
+{
+  "type": "FeatureCollection",
+  "timeStamp": "<ISO timestamp>",
+  "numberMatched": <count>,
+  "numberReturned": <count>,
+  "features": [
+    {
+      "type": "Feature",
+      "id": "<building_id_1>",
+      "geometry": { "type": "Point", "coordinates": [ <lon_1>, <lat_1> ] },
+      "properties": {
+        "buem": {
+          "building_attributes": {
+            /* original or normalized attributes */
+          },
+          "thermal_load_profile": {
+            "start_time": "<ISO timestamp>",
+            "end_time": "<ISO timestamp>",
+            "n_points": <int>,
+            "heating_total_kWh": <number>,
+            "cooling_total_kWh": <number>,
+            "heating_peak_kW": <number>,
+            "cooling_peak_kW": <number>,
+            "elapsed_s": <number>,
+            "index": [ /* optional ISO timestamps when include_timeseries true */ ],
+            "heat": [ /* numeric array, optional */ ],
+            "cool": [ /* numeric array, optional */ ],
+            "timeseries_file": "/api/files/<filename>.json.gz" /* optional when saved */
+          }
+        }
+      }
+    }
+  ]
+}
