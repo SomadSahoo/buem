@@ -42,7 +42,7 @@ class OccupancyProfile:
         self.year = year
         self.seed = seed
         self.rng = np.random.default_rng(seed)
-        self.index = pd.date_range(start=f"{year}-01-01", end=f"{year}-12-31 23:00", freq="H")
+        self.index = pd.date_range(start=f"{year}-01-01", end=f"{year}-12-31 23:00", freq="h")
         self.profile: Optional[pd.DataFrame] = None
 
     def generate(self, seed: Optional[int] = None) -> pd.DataFrame:

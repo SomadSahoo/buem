@@ -1,0 +1,19 @@
+name: buem_env
+channels:
+  - conda-forge
+  - default
+dependencies:
+  - python=3.11
+  - matplotlib
+  - numpy
+  - pandas
+  - pvlib
+  - scipy
+  - sympy
+  - openpyxl
+  - cvxpy
+  - flask
+  - python-dotenv
+  - pulp
+  - gunicorn    # required only inside container
+  - coincbc     # if you want conda solver inside container; apt-get coinor-cbc already installed too

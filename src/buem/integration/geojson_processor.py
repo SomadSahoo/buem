@@ -1,276 +1,242 @@
 """
-GeoJson_Processor
-
-Processes incoming GeoJSON (Feature or FeatureCollection) or a plain JSON
-containing a top-level "buem" object. For each feature it:
- - extracts building_attributes (optionally enriches via db_fetcher),
- - requires structured `components` (no legacy flat-key inference),
- - builds a normalized configuration via CfgBuilding,
- - validates it (validate_cfg),
- - runs the BUEM thermal model (run_model),
- - writes a compact thermal_load_profile back into feature.properties.buem.
-
-By default only compact summaries are embedded (start_time, end_time,
-n_points, totals, peaks). Set include_timeseries=True to embed full
-time-series arrays (may be large for 8760 points).
+Process GeoJSON payloads: extract attributes, run thermal model, return results.
 """
 from typing import Any, Callable, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-import json
 import time
-import os
 import uuid
+import json
 import gzip
-import pandas as pd
-import numpy as np
-import traceback
-from flask import current_app
 import logging
+import numpy as np
+import pandas as pd
+from flask import current_app
 
+from buem.integration.attribute_builder import AttributeBuilder
 from buem.config.cfg_building import CfgBuilding
 from buem.main import run_model
-from buem.config.validator import validate_cfg
-
-DEFAULT_RESULT_SAVE = None  # set to a path string to persist last result
 
 logger = logging.getLogger(__name__)
 
+
 class GeoJsonProcessor:
+    """
+    Process GeoJSON FeatureCollection with building energy model specifications.
+    
+    Workflow:
+    1. Extract building attributes from GeoJSON feature
+    2. Merge with database/defaults via AttributeBuilder
+    3. Run thermal model (heating/cooling loads)
+    4. Compute summary statistics
+    5. Save timeseries .gz file (optional)
+    6. Return results in GeoJSON format
+    
+    Parameters
+    ----------
+    payload : Dict[str, Any]
+        GeoJSON FeatureCollection or single Feature.
+    include_timeseries : bool, optional
+        Save hourly timeseries to .gz file (default: False).
+    db_fetcher : Callable, optional
+        Function(building_id) -> Dict of additional attributes.
+    result_save_dir : str or Path, optional
+        Directory for saving .gz files (default: env BUEM_RESULTS_DIR).
+    """
+    
     def __init__(
         self,
         payload: Dict[str, Any],
         include_timeseries: bool = False,
         db_fetcher: Optional[Callable[[str], Dict[str, Any]]] = None,
-        result_save_path: Optional[str] = DEFAULT_RESULT_SAVE,
-        result_save_dir: Optional[str] = None,  # dir to save large timeseries files
+        result_save_dir: Optional[str] = None,
     ):
         self.payload = payload
         self.include_timeseries = include_timeseries
         self.db_fetcher = db_fetcher
-        self.result_save_path = result_save_path
-        self.result_save_dir = result_save_dir or os.environ.get("BUEM_RESULTS_DIR", r"C:\test\buem\results")
-
-    # ---------- payload detection / normalization ----------
-    def _is_feature_collection(self, doc: Dict[str, Any]) -> bool:
-        return doc.get("type") == "FeatureCollection" and isinstance(doc.get("features"), list)
-
-    def _is_feature(self, doc: Dict[str, Any]) -> bool:
-        return doc.get("type") == "Feature" and "properties" in doc
-
-    def _has_top_buem(self, doc: Dict[str, Any]) -> bool:
-        return "buem" in doc
-
-    def _iter_features(self) -> List[Dict[str, Any]]:
-        """
-        Normalize payload into list of Feature dicts.
-        Raises ValueError if payload cannot be interpreted.
-        """
-        if self._is_feature_collection(self.payload):
-            return list(self.payload["features"])
-        if self._is_feature(self.payload):
-            return [self.payload]
-        if self._has_top_buem(self.payload):
-            # wrap a top-level buem object into a single Feature
-            return [{
-                "type": "Feature",
-                "id": self.payload.get("id"),
-                "geometry": self.payload.get("geometry"),
-                "properties": {"buem": self.payload["buem"]}
-            }]
-        raise ValueError("Payload is not a Feature, FeatureCollection, or a top-level buem object")
-
-    # ---------- core processing ----------
+        
+        # Result save directory
+        if result_save_dir:
+            self.result_save_dir = Path(result_save_dir)
+        else:
+            import os
+            default_dir = Path(__file__).resolve().parents[1] / "results"
+            self.result_save_dir = Path(os.environ.get("BUEM_RESULTS_DIR", str(default_dir)))
+    
     def process(self) -> Dict[str, Any]:
         """
-        Process all features and return a FeatureCollection with updated
-        properties.buem.thermal_load_profile for each feature.
+        Process all features and return GeoJSON FeatureCollection with results.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            GeoJSON FeatureCollection with thermal_load_profile added to each feature.
         """
-        start_all = time.time()
-        features = self._iter_features()
+        start_time = time.time()
+        
+        # Normalize to FeatureCollection
+        if self.payload.get("type") == "Feature":
+            features = [self.payload]
+        elif self.payload.get("type") == "FeatureCollection":
+            features = self.payload.get("features", [])
+        else:
+            raise ValueError("Payload must be GeoJSON Feature or FeatureCollection")
+        
+        # Process each feature
         out_features = []
         for feat in features:
             try:
                 processed = self._process_single_feature(feat)
                 out_features.append(processed)
             except Exception as exc:
-                # attach structured error to the feature and continue
-                props = feat.setdefault("properties", {})
-                buem_obj = props.setdefault("buem", {})
-                err_info = {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-                # include traceback when Flask debug is enabled for easier debugging
-                try:
-                    app_debug = bool(current_app.debug)
-                except Exception:
-                    app_debug = False
-                if app_debug:
-                    err_info["traceback"] = traceback.format_exc()
-                buem_obj["thermal_load_profile"] = err_info
+                logger.exception(f"Feature {feat.get('id')} failed: {exc}")
+                # Include error in feature
+                feat.setdefault("properties", {}).setdefault("buem", {})["error"] = str(exc)
                 out_features.append(feat)
-
-        out = {
+        
+        return {
             "type": "FeatureCollection",
             "features": out_features,
-            "processed_at": datetime.utcnow().isoformat() + "Z",
-            "processing_elapsed_s": round(time.time() - start_all, 3),
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "processing_elapsed_s": round(time.time() - start_time, 3),
         }
-
-        if self.result_save_path:
-            try:
-                with open(self.result_save_path, "w", encoding="utf-8") as f:
-                    json.dump(out, f, indent=2, default=str)
-            except Exception:
-                # best-effort persistence only
-                pass
-        return out
-
-    def _save_timeseries_file(self, times, heating, cooling) -> str:
-        """
-        Save times, heating, cooling as gzipped JSON in result_save_dir.
-        Returns filename (basename). Caller maps to /api/files/<filename>.
-        """
-        Path(self.result_save_dir).mkdir(parents=True, exist_ok=True)
-        fname = f"buem_ts_{uuid.uuid4().hex}.json.gz"
-        full = Path(self.result_save_dir) / fname
-        payload = {
-            "index": [ts.isoformat() for ts in list(times)],
-            "heat": [float(x) for x in list(heating)],
-            "cool": [float(x) for x in list(cooling)],
-        }
-        with gzip.open(full, "wt", encoding="utf-8") as gz:
-            json.dump(payload, gz, indent=None)
-        return fname
-
+    
     def _process_single_feature(self, feature: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process a single GeoJSON Feature.
-
-        Steps:
-         - read properties.buem.building_attributes
-         - optionally enrich attributes via db_fetcher(building_id)
-         - require structured 'components' in the attributes (no legacy keys)
-         - normalize with CfgBuilding and validate
-         - run run_model(cfg_dict)
-         - write summary (and optionally full time-series) into properties.buem.thermal_load_profile
-
-        Returns modified feature dict.
+        Process single GeoJSON feature: build attributes, run model, add results.
+        
+        Parameters
+        ----------
+        feature : Dict[str, Any]
+            GeoJSON Feature with properties.buem.building_attributes.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Feature with added thermal_load_profile in properties.buem.
         """
         props = feature.setdefault("properties", {})
-        buem = props.get("buem")
-        if not buem:
-            raise ValueError("Feature missing properties.buem")
-
-        # gather building attributes, allow db enrichment if available
-        b_attrs = buem.get("building_attributes", {}) or {}
-        building_id = feature.get("id") or b_attrs.get("building_id") or buem.get("building_id")
-
-        if self.db_fetcher and building_id:
-            try:
-                fetched = self.db_fetcher(building_id) or {}
-            except Exception:
-                fetched = {}
-            # payload attributes override fetched defaults
-            merged_attrs = {**fetched, **b_attrs}
-        else:
-            merged_attrs = dict(b_attrs)  # make a shallow copy
-
-        # ---- Enforce structured configuration: require 'components' object ----
-        if "components" not in merged_attrs or not isinstance(merged_attrs["components"], dict):
-            raise ValueError(
-                "Missing required 'components' object in building_attributes. "
-                "Legacy flat-key inputs (A_ref, U_Walls, ...) are not accepted. "
-                "Please provide a structured 'components' dictionary per documentation."
-            )
-
-        # ---- Normalization: convert plain lists to pandas Series/DataFrame where appropriate ----
-        # Convert building-level time series (commonly 'elecLoad', 'Q_ig') from lists -> pd.Series
-        for k in ("elecLoad", "Q_ig", "internalGains", "Q_int"):
-            if k in merged_attrs and isinstance(merged_attrs[k], list):
-                merged_attrs[k] = pd.Series(merged_attrs[k])
-
-        # If a weather object is present inside buem (not necessarily in building_attributes),
-        # ensure weather columns are DataFrame/Series with proper index if given as lists.
-        weather_obj = buem.get("weather") or merged_attrs.get("weather")
-        if isinstance(weather_obj, dict):
-            idx = None
-            if "index" in weather_obj and isinstance(weather_obj["index"], list):
-                try:
-                    idx = pd.to_datetime(weather_obj["index"])
-                except Exception:
-                    idx = None
-            df_cols = {}
-            for col in ("T", "GHI", "DNI", "DHI"):
-                if col in weather_obj and isinstance(weather_obj[col], list):
-                    ser = pd.Series(weather_obj[col], index=idx) if idx is not None else pd.Series(weather_obj[col])
-                    df_cols[col] = ser
-            if df_cols:
-                weather_df = pd.DataFrame(df_cols)
-                if idx is not None:
-                    weather_df.index = idx
-                merged_attrs["weather"] = weather_df
-
-        # Pass the Python object straight into CfgBuilding so pandas objects are preserved.
-        # CfgBuilding now accepts dicts (and still accepts JSON strings for backwards compatibility).
-        cfgb = CfgBuilding(merged_attrs)
-        # Get the normalized cfg dict that the model expects
-        cfg = cfgb.to_cfg_dict()
-
-        # Log prepared cfg keys safely (Flask logger preferred)
-        try:
-            current_app.logger.debug("Prepared cfg keys: %s", sorted(cfg.keys()))
-        except Exception:
-            logger.debug("Prepared cfg keys: %s", sorted(cfg.keys()))
-
-        # Run validator and catch any unexpected validator failures.
-        try:
-            issues = validate_cfg(cfg)
-        except Exception as exc:
-            tb = traceback.format_exc()
-            raise RuntimeError("validate_cfg raised an exception:\n" + tb) from exc
-
-        if issues:
-            raise ValueError("Configuration validation failed: " + "; ".join(issues))
-
-        # run model (use use_milp if requested in buem)
+        buem = props.setdefault("buem", {})
+        building_id = feature.get("id")
+        payload_attrs = buem.get("building_attributes", {})
+        
+        #  Build complete attributes
+        builder = AttributeBuilder(
+            payload_attrs=payload_attrs,
+            building_id=building_id,
+            db_fetcher=self.db_fetcher
+        )
+        merged_attrs = builder.build()
+        
+        # Convert to model config
+        cfg = CfgBuilding(merged_attrs).to_cfg_dict()
+        
+        # Run thermal model
         use_milp = bool(buem.get("use_milp", False))
+        start = time.time()
         res = run_model(cfg, plot=False, use_milp=use_milp)
-
-        times = res["times"]
-        heating = np.asarray(res["heating"])
-        cooling = np.asarray(res["cooling"])
-
-        # build compact profile
-        profile: Dict[str, Any] = {
-            "start_time": times[0].isoformat(),
-            "end_time": times[-1].isoformat(),
-            "n_points": int(len(times)),
-            "heating_total_kWh": float(np.sum(heating)),
-            "cooling_total_kWh": float(np.sum(np.abs(cooling))),
-            "heating_peak_kW": float(np.max(heating)) if heating.size else 0.0,
-            "cooling_peak_kW": float(np.max(np.abs(cooling))) if cooling.size else 0.0,
-            "elapsed_s": float(res.get("elapsed_s", 0.0)),
-        }
-
-        if self.include_timeseries:
-            if self.result_save_dir:
-                try:
-                    fname = self._save_timeseries_file(times, heating, cooling)
-                    profile["timeseries_file"] = f"/api/files/{fname}"
-                except Exception:
-                    profile["index"] = [ts.isoformat() for ts in list(times)]
-                    profile["heat"] = [float(x) for x in heating.tolist()]
-                    profile["cool"] = [float(x) for x in cooling.tolist()]
+        elapsed = time.time() - start
+        
+        # Extract results
+        times = res.get("times", [])
+        heating = np.asarray(res.get("heating", []), dtype=float)
+        cooling = np.asarray(res.get("cooling", []), dtype=float)
+        
+        # Electricity: prefer model output, else use cfg elecLoad
+        if "electricity" in res:
+            electricity = np.asarray(res["electricity"], dtype=float)
+        else:
+            elec_cfg = cfg.get("elecLoad")
+            if isinstance(elec_cfg, pd.Series):
+                electricity = elec_cfg.values.astype(float)
             else:
-                profile["index"] = [ts.isoformat() for ts in list(times)]
-                profile["heat"] = [float(x) for x in heating.tolist()]
-                profile["cool"] = [float(x) for x in cooling.tolist()]
-
-        # embed results into feature
-        out_buem = dict(buem)
-        out_buem["building_attributes"] = merged_attrs
-        out_buem["thermal_load_profile"] = profile
-        props["buem"] = out_buem
+                electricity = np.asarray(elec_cfg or [], dtype=float)
+        
+        # Sanitize NaN/inf
+        heating = np.nan_to_num(heating, nan=np.nan, posinf=1e9, neginf=-1e9)
+        cooling = np.nan_to_num(cooling, nan=np.nan, posinf=1e9, neginf=-1e9)
+        electricity = np.nan_to_num(electricity, nan=np.nan, posinf=1e9, neginf=-1e9)
+        
+        # Check for NaN
+        nan_h, nan_c, nan_e = np.isnan(heating).sum(), np.isnan(cooling).sum(), np.isnan(electricity).sum()
+        if nan_h or nan_c or nan_e:
+            logger.warning(
+                f"Feature {building_id}: NaN in results (heat={nan_h}/{heating.size}, "
+                f"cool={nan_c}/{cooling.size}, elec={nan_e}/{electricity.size})"
+            )
+        
+        # Build summary profile
+        profile = self._build_summary(times, heating, cooling, electricity, elapsed)
+        
+        # Save timeseries if requested
+        if self.include_timeseries and len(times):
+            try:
+                fname = self._save_timeseries(times, heating, cooling, electricity)
+                profile["timeseries_file"] = f"/api/files/{fname}"
+            except Exception as exc:
+                logger.exception(f"Timeseries save failed: {exc}")
+        
+        # Attach results (do not include large arrays in response)
+        buem["thermal_load_profile"] = profile
+        
         return feature
+    
+    def _build_summary(
+        self, times, heating, cooling, electricity, elapsed
+    ) -> Dict[str, Any]:
+        """Compute summary statistics from timeseries arrays."""
+        safe_sum = lambda arr: float(np.nansum(arr)) if len(arr) else 0.0
+        safe_max = lambda arr: float(np.nanmax(arr)) if len(arr) else 0.0
+        safe_min = lambda arr: float(np.nanmin(arr)) if len(arr) else 0.0
+
+        # Handle times (may be DatetimeIndex, list, or empty)
+        has_times = False
+        if isinstance(times, pd.DatetimeIndex):
+            has_times = not times.empty
+        elif times is not None:
+            has_times = len(times) > 0       
+
+        return {
+            "heating_total_kWh": safe_sum(heating),
+            "heating_peak_kW": safe_max(heating),
+            "cooling_total_kWh": abs(safe_sum(cooling)),
+            "cooling_peak_kW": abs(safe_min(cooling)),
+            "electricity_total_kWh": safe_sum(electricity),
+            "electricity_peak_kW": safe_max(electricity),
+            "start_time": times[0].isoformat() if has_times else None,
+            "end_time": times[-1].isoformat() if has_times else None,
+            "n_points": len(times) if has_times else 0,
+            "elapsed_s": round(elapsed, 3),
+        }
+    
+    def _save_timeseries(self, times, heating, cooling, electricity) -> str:
+        """
+        Save timeseries as gzipped JSON.
+        
+        Returns
+        -------
+        str
+            Filename (e.g., 'buem_ts_abc123.json.gz').
+        """
+        self.result_save_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"buem_ts_{uuid.uuid4().hex}.json.gz"
+        full_path = self.result_save_dir / fname
+
+        # Convert times to list of ISO strings (handles DatetimeIndex or list)
+        if isinstance(times, pd.DatetimeIndex):
+            time_list = [t.isoformat() for t in times]
+        else:
+            time_list = [t.isoformat() for t in times]       
+
+        payload = {
+            "index": time_list,
+            "heat": [float(x) for x in heating.tolist()],
+            "cool": [float(x) for x in cooling.tolist()],
+            "electricity": [float(x) for x in electricity.tolist()] if len(electricity) else [],
+        }
+        
+        with gzip.open(full_path, "wt", encoding="utf-8") as gz:
+            json.dump(payload, gz, indent=None)
+        
+        logger.info(f"Saved timeseries: {full_path}")
+        return fname

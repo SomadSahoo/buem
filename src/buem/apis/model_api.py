@@ -25,8 +25,13 @@ def _to_serializable_timeseries(times_index, arr):
 def run_building_model():
     start = time.time()
     try:
-        payload = request.get_json(force=True, silent=True) or {}
-        include_ts = bool(request.args.get("include_timeseries", "false").lower() == "true") or bool(payload.get("include_timeseries", False))
+        payload = request.get_json(force=True)
+        include_ts = (request.args.get("include_timeseries", None) or
+        (str(payload.get("include_timeseries")).lower() if payload and 
+         "include_timeseries" in payload else "false")
+        )
+        include_ts = str(include_ts).lower() == "true"
+        gp = GeoJsonProcessor(payload, include_timeseries=include_ts, db_fetcher=...)
 
         cfgb = CfgBuilding(json.dumps(payload))
         cfg = cfgb.to_cfg_dict()

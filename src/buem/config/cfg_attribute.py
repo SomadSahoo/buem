@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import os
@@ -159,6 +160,10 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
     "F_w": AttributeSpec("F_w", AttributeCategory.FIXED, AttrType.FLOAT, 1.0),
     "ventControl": AttributeSpec("ventControl", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
     "control": AttributeSpec("control", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
+    "num_persons": AttributeSpec("num_persons", AttributeCategory.FIXED, AttrType.INT, 4, doc="Default persons for electricity profile generation"),
+    "year": AttributeSpec("year", AttributeCategory.FIXED, AttrType.INT, 2018, doc="Default year for profile generation"),
+    "seed": AttributeSpec("seed", AttributeCategory.FIXED, AttrType.INT, None, doc="Optional RNG seed for reproducible electricity profiles"),
+    "use_provided_elecLoad": AttributeSpec("use_provided_elecLoad", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="If true, keep provided elecLoad even when force=True"),
 }
 
 # multi Family house (MFH), existing state refurbishment - NL.N.MFH.01.Gen

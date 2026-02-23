@@ -1,4 +1,6 @@
 from flask import Flask, jsonify
+from dotenv import load_dotenv
+from pathlib import Path
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -6,8 +8,12 @@ from logging.handlers import RotatingFileHandler
 from buem.apis.model_api import bp as model_bp
 from buem.apis.files_api import bp as files_bp 
 
+# load environment variables from .env file
+load_dotenv()
+
 # prefer env var; fallback to project-local path for Windows
-LOG_FILE = os.environ.get("BUEM_LOG_FILE", r"C:\\test\\buem\\src\\buem\\logs\\buem_api.log")
+DEFAULT_LOG = Path(__file__).resolve().parents[2] / "logs" / "buem_api.log"
+LOG_FILE = Path(os.environ.get("BUEM_LOG_FILE") or DEFAULT_LOG)
 
 def create_app():
     app = Flask(__name__)
@@ -15,10 +21,10 @@ def create_app():
     app.register_blueprint(files_bp)  # register files endpoint
 
     # centralized logging - rotates to limit disk usage
-    logdir = os.path.dirname(LOG_FILE)
-    if logdir and not os.path.exists(logdir):
-        os.makedirs(logdir, exist_ok=True)
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+    logdir = LOG_FILE.parent
+    if not logdir.exists():
+        logdir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     handler.setFormatter(formatter)
     handler.setLevel(logging.DEBUG)
@@ -30,6 +36,7 @@ def create_app():
     # configure root logger and Werkzeug (HTTP request) logger to use same handler
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
     # avoid duplicate handlers if already attached
     if handler not in root_logger.handlers:
         root_logger.addHandler(handler)

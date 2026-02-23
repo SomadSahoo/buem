@@ -1,13 +1,14 @@
 package:
   name: buem
-  version: "0.1.0"
+  version: "0.1.2"
 
 source:
-  path: .
+  path: ..
 
 build:
   noarch: python
-  script: python -m pip install .
+  number: 0
+  script: "{{ PYTHON }} -m pip install . --no-deps -vv"
 
 requirements:
   host:
@@ -26,8 +27,9 @@ requirements:
     - flask
     - python-dotenv
     - gunicorn
-    - coincbc
     - pulp
+    - coinor-cbc # [linux] # native solver only required for Linux containers 
+    - gunicorn   # [linux] # server only for container/production
 
 about:
   summary: "Building thermal simulation module (ISO 52016-1 5R1C)"

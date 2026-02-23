@@ -14,6 +14,16 @@ dependencies:
   - cvxpy
   - flask
   - python-dotenv
-  - gunicorn
+#   - gunicorn
   - coincbc
   - pulp
+  # Documentation dependencies
+  - sphinx>=4.5.0
+  - sphinx_rtd_theme>=1.0.0
+  - pip
+  - pip:
+    - sphinxcontrib-applehelp==1.0.4
+    - sphinxcontrib-devhelp==1.0.2
+    - sphinxcontrib-htmlhelp==2.0.1
+    - sphinxcontrib-qthelp==1.0.3
+    - sphinxcontrib-serializinghtml==1.1.5

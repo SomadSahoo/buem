@@ -1,6 +1,6 @@
 {
   "type": "FeatureCollection",
-  "timeStamp": "2026-01-22T00:00:00Z",
+  "timeStamp": "2018-01-22T00:00:00Z",
   "numberMatched": 1,
   "numberReturned": 1,
   "features": [
@@ -44,7 +44,7 @@
               "Doors": {
                 "U": 3.5,
                 "elements": [
-                  { "id": "Door_1", "area": 2.0, "surface": "Wall_1", "azimuth": 0.0, "tilt": 90.0 }
+                  { "id": "Door_1", "area": 2.0, "surface": "Wall_1", "azimuth": 0.0, "tilt": 0.0 }
                 ]
               },
               "Ventilation": { "elements": [ { "id": "Vent_1", "air_changes": 0.5 } ] }

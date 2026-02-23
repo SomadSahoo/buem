@@ -10,11 +10,13 @@ services:
       - PYTHONPATH=/app/src
       - BUEM_WEATHER_DIR=/app/data/weather
       - BUEM_CBC_EXE=/opt/conda/envs/buem_env/bin/cbc
+      - BUEM_RESULTS_DIR=/app/results
     ports:
       - "5000:5000"
     volumes:
       - ./src/buem/data/weather:/app/data/weather:ro
       - ./src/buem/logs:/app/logs:rw
+      - ./src/buem/results:/app/results:rw
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:5000/api/health || exit 1"]

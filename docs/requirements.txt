@@ -1,0 +1,17 @@
+# Documentation dependencies for ReadTheDocs
+Sphinx==4.5.0
+sphinx-rtd-theme==1.0.0
+Jinja2<3.1
+sphinxcontrib-applehelp==1.0.4
+sphinxcontrib-devhelp==1.0.2
+sphinxcontrib-htmlhelp==2.0.1
+sphinxcontrib-qthelp==1.0.3
+sphinxcontrib-serializinghtml==1.1.5
+
+# Additional dependencies for autodoc
+numpy
+pandas
+flask
+
+# Version reading support (fallback for Python < 3.11)
+tomli; python_version < "3.11"

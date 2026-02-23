@@ -7,8 +7,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # copy env and create conda env
-COPY environment.yml /app/
-RUN conda env create -f /app/environment.yml && conda clean -afy
+COPY environment_docker.yml /app/
+RUN conda env create -f /app/environment_docker.yml && conda clean -afy
 
 # ensure conda env bin is first on PATH so gunicorn/python are available directly
 ENV PATH=/opt/conda/envs/buem_env/bin:$PATH
@@ -26,5 +26,5 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:5000/api/health || exit 1
 
-# run gunicorn directly (uses gunicorn from conda env installed via environment.yml)
+# run gunicorn directly (uses gunicorn from conda env installed via environment_docker.yml)
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "buem.apis.api_server:create_app()", "--workers", "2", "--threads", "2"]
