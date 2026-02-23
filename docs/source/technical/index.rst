@@ -7,6 +7,7 @@ This section provides in-depth technical information about BuEM's implementation
    :maxdepth: 2
 
    architecture
+   implementation_details
    thermal_algorithms
    validation
    performance

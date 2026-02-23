@@ -12,21 +12,21 @@
 #
 import os
 import sys
+import tomllib
+from pathlib import Path
 
 # Add the project source directory to Python path for autodoc
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-src_path = os.path.join(project_root, 'src')
-if os.path.exists(src_path):
-    sys.path.insert(0, src_path)
+# This is standard practice for Sphinx to enable module imports
+project_root = Path(__file__).parent.parent.parent.resolve()
+src_path = project_root / 'src'
+
+if src_path.exists():
+    sys.path.insert(0, str(src_path))
 
 # Import version from pyproject.toml
 try:
-    import tomllib  # Python 3.11+
-except ImportError:
-    import tomli as tomllib  # Fallback for older Python versions
-
-try:
-    with open(os.path.join(project_root, 'pyproject.toml'), 'rb') as f:
+    pyproject_path = project_root / 'pyproject.toml'
+    with open(pyproject_path, 'rb') as f:
         pyproject = tomllib.load(f)
         project_version = pyproject['project']['version']
 except (FileNotFoundError, KeyError):
@@ -86,7 +86,6 @@ html_theme_options = {
     'canonical_url': '',
     'analytics_id': '',  # Provided by Google in your dashboard
     'logo_only': False,
-    'display_version': True,
     'prev_next_buttons_location': 'bottom',
     'style_external_links': False,
     'vcs_pageview_mode': '',

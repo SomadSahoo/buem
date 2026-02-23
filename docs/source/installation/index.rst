@@ -9,7 +9,6 @@ This guide covers different installation methods for BuEM depending on your use 
    conda_setup
    docker_installation
    development_setup
-   production_deployment
 
 Quick Start
 -----------
@@ -74,4 +73,4 @@ Next Steps
 Choose your installation method:
 - :doc:`docker_installation` for production deployment
 - :doc:`conda_setup` for development work
-- :doc:`production_deployment` for scalable deployment
+- :doc:`../deployment/production_deployment` for scalable deployment

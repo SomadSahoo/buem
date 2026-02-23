@@ -31,3 +31,15 @@ dist/
 .idea/
 .vscode/
 .softwares/*
+
+# Documentation builds and caches
+docs/build/
+docs/_build/
+docs/.doctrees/
+*.doctree
+
+# Sphinx temporary files
+docs/source/_autosummary/
+
+# Local conda environment (use global instead)
+.conda/

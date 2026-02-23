@@ -8,11 +8,12 @@ BuEM (Building Energy Model) is a comprehensive thermal simulation tool designed
    :caption: Contents:
 
    introduction/index
+   installation/index
    api_integration/index
    model_attributes/index
-   technical/index
-   installation/index
    examples/index
+   technical/index
+   deployment/index
 
 
 Indices and tables
