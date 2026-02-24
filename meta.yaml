@@ -30,6 +30,9 @@ requirements:
     - pulp
     - coinor-cbc # [linux] # native solver only required for Linux containers 
     - gunicorn   # [linux] # server only for container/production
+    - pip
+    - marshmallow >=4.0.0
+    - marshmallow-dataclass >=8.0.0
 
 about:
   summary: "Building thermal simulation module (ISO 52016-1 5R1C)"

@@ -6,7 +6,8 @@ import copy
 import pandas as pd
 import numpy as np
 
-from buem.config.cfg_attribute import cfg as DEFAULT_CFG, ATTRIBUTE_SPECS, AttributeSpec, AttrType, AttributeCategory
+from buem.config.cfg_attribute import cfg as DEFAULT_CFG, ATTRIBUTE_SPECS
+from buem.config.attribute_types import AttributeSpec, AttrType, AttributeCategory
 
 
 def _series_to_list(s: Optional[pd.Series]) -> Optional[list]:

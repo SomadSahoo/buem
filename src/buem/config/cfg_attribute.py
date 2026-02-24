@@ -2,11 +2,11 @@ from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import os
-from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Dict, Optional
 
 from buem.weather.from_csv import CsvWeatherData
+from .attribute_types import AttributeCategory, AttrType, AttributeSpec
+
 # --- changed code: make weather CSV path configurable via BUEM_WEATHER_DIR env var ---
 # Default to package-local data folder if env var is not set so behavior is backwards-compatible.
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
@@ -32,35 +32,6 @@ temp_profile = df_weather["T"]
 ghi_profile = df_weather["GHI"]
 dni_profile = df_weather["DNI"]
 dhi_profile = df_weather["DHI"]
-
-class AttributeCategory(Enum):
-    """Category of attribute used by the API and builder."""
-    WEATHER = "weather"
-    TABULA = "tabula"
-    BOOLEAN = "boolean"
-    FIXED = "fixed"
-    OTHER = "other"
-
-class AttrType(Enum):
-    """Type hints for attribute values to help parsing/validation."""
-    DATAFRAME = "dataframe"   # full weather DataFrame
-    SERIES = "series"         # time series (pd.Series)
-    FLOAT = "float"
-    INT = "int"
-    BOOL = "bool"
-    STR = "str"
-    LIST = "list"             # generic list (e.g., roofs)
-    OBJECT = "object"         # complex object (dict)
-    UNKNOWN = "unknown"
-
-@dataclass
-class AttributeSpec:
-    """Specification for a configuration attribute."""
-    name: str
-    category: AttributeCategory
-    type: AttrType
-    default: Any = None
-    doc: Optional[str] = None
 
 # Build attribute specs using the same defaults used in legacy cfg dict.
 # This centralizes attribute metadata so cfg_building can infer how to parse/serialize.

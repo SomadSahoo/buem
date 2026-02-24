@@ -17,3 +17,7 @@ dependencies:
   - pulp
   - gunicorn    # required only inside container
   - coincbc     # if you want conda solver inside container; apt-get coinor-cbc already installed too
+  - pip
+  - pip:
+    - marshmallow>=4.0.0
+    - marshmallow-dataclass>=8.0.0
