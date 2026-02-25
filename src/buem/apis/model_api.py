@@ -10,7 +10,7 @@ from buem.main import run_model
 from buem.config.validator import validate_cfg
 
 # new import: integration processor
-from buem.integration.geojson_processor import GeoJsonProcessor
+from buem.integration.python.geojson_processor import GeoJsonProcessor
 
 bp = Blueprint("model_api", __name__, url_prefix="/api")
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ def run_building_model():
     try:
         payload = request.get_json(force=True)
         include_ts = (request.args.get("include_timeseries", None) or
-        (str(payload.get("include_timeseries")).lower() if payload and 
+        (str(payload.get("include_timeseries")).lower() if payload and
          "include_timeseries" in payload else "false")
         )
         include_ts = str(include_ts).lower() == "true"
