@@ -18,6 +18,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class SmartComponentsField(fields.Field):
+    """Custom field that validates components with proper context for element types."""
+    
+    def _serialize(self, value, attr, obj, **kwargs):
+        return value
+    
+    def _deserialize(self, value, attr, data, **kwargs):
+        if not isinstance(value, dict):
+            raise ValidationError("Components must be a dictionary")
+        
+        errors = {}
+        result = {}
+        
+        for component_type, component_data in value.items():
+            try:
+                # Create schema and set context
+                schema = ComponentSchema()
+                schema.context = {'component_type': component_type}
+                result[component_type] = schema.load(component_data)
+            except ValidationError as e:
+                errors[component_type] = e.messages
+        
+        if errors:
+            raise ValidationError(errors)
+        
+        return result
+
+
 class ComponentType(str, Enum):
     """Component types for building elements."""
     WALL = "wall"
@@ -80,7 +108,7 @@ class ValidationResult:
 
 
 class ComponentElementSchema(Schema):
-    """Schema for individual building component elements."""
+    """Schema for individual building component elements (walls, roof, floor, windows, doors)."""
     id = fields.Str(required=True, validate=lambda x: len(x.strip()) > 0)
     area = fields.Float(required=True, validate=lambda x: x > 0)
     azimuth = fields.Float(required=True, validate=lambda x: 0 <= x <= 360)
@@ -90,17 +118,35 @@ class ComponentElementSchema(Schema):
     U = fields.Float(validate=lambda x: x > 0, required=False, allow_none=True)  # Allow per-element U-values
     
     @validates('id')
-    def validate_id_format(self, value):
+    def validate_id_format(self, value, **kwargs):
         """Validate element ID format."""
         if not value or not value.strip():
             raise ValidationError("Element ID cannot be empty")
         # Add any specific ID format requirements here
     
     @validates('azimuth')
-    def validate_azimuth_range(self, value):
+    def validate_azimuth_range(self, value, **kwargs):
         """Validate azimuth is in valid range."""
         if not 0 <= value <= 360:
             raise ValidationError("Azimuth must be between 0 and 360 degrees")
+
+
+class VentilationElementSchema(Schema):
+    """Schema for ventilation system elements."""
+    id = fields.Str(required=True, validate=lambda x: len(x.strip()) > 0)
+    air_changes = fields.Float(required=True, validate=lambda x: x >= 0)
+    
+    @validates('id')
+    def validate_id_format(self, value, **kwargs):
+        """Validate element ID format."""
+        if not value or not value.strip():
+            raise ValidationError("Element ID cannot be empty")
+    
+    @validates('air_changes')
+    def validate_air_changes_range(self, value, **kwargs):
+        """Validate air changes is non-negative."""
+        if value < 0:
+            raise ValidationError("Air changes must be non-negative")
 
 
 class ComponentSchema(Schema):
@@ -108,11 +154,49 @@ class ComponentSchema(Schema):
     U = fields.Float(validate=lambda x: x > 0, required=False, allow_none=True)  # Component-level U-value
     g_gl = fields.Float(validate=lambda x: 0 < x < 1, required=False, allow_none=True)  # For windows
     b_transmission = fields.Float(validate=lambda x: x > 0, load_default=1.0)
-    elements = fields.List(fields.Nested(ComponentElementSchema), required=True, validate=lambda x: len(x) > 0)
+    elements = fields.Raw(required=True, validate=lambda x: len(x) > 0)
+    
+    @validates('elements')
+    def validate_elements(self, value, **kwargs):
+        """
+        Validate elements using appropriate schema based on component type.
+        
+        For Ventilation components, use VentilationElementSchema.
+        For other components (Walls, Roof, Floor), use ComponentElementSchema.
+        """
+        if not isinstance(value, list) or len(value) == 0:
+            raise ValidationError("Elements must be a non-empty list")
+        
+        # Get component type from context
+        component_type = self.context.get('component_type')
+        
+        # Choose appropriate schema based on component type
+        if component_type and 'ventilation' in component_type.lower():
+            schema_class = VentilationElementSchema
+        else:
+            schema_class = ComponentElementSchema
+        
+        # Validate each element
+        schema = schema_class()
+        errors = {}
+        
+        for i, element_data in enumerate(value):
+            try:
+                schema.load(element_data)
+            except ValidationError as e:
+                errors[i] = e.messages
+        
+        if errors:
+            raise ValidationError(errors)
     
     @validates_schema
     def validate_u_value_requirement(self, data, **kwargs):
         """Ensure either component-level or element-level U-values are provided."""
+        # Skip U-value validation for ventilation components
+        component_type = self.context.get('component_type')
+        if component_type and 'ventilation' in component_type.lower():
+            return  # Ventilation components use air_changes, not U-values
+            
         component_u = data.get('U')
         elements = data.get('elements', [])
         
@@ -156,16 +240,16 @@ class BuildingAttributesSchema(Schema):
     height_m = fields.Float(validate=lambda x: x > 0, required=False, allow_none=True)
     
     # Components (nested structure - preferred)
-    components = fields.Dict(keys=fields.Str(), values=fields.Nested(ComponentSchema), required=False, allow_none=True)
+    components = SmartComponentsField(required=False, allow_none=True)
     
     @validates('latitude')
-    def validate_latitude(self, value):
+    def validate_latitude(self, value, **kwargs):
         """Validate latitude range."""
         if not -90 <= value <= 90:
             raise ValidationError("Latitude must be between -90 and 90")
     
     @validates('longitude')  
-    def validate_longitude(self, value):
+    def validate_longitude(self, value, **kwargs):
         """Validate longitude range."""
         if not -180 <= value <= 180:
             raise ValidationError("Longitude must be between -180 and 180")
@@ -182,7 +266,7 @@ class PropertiesSchema(Schema):
     """Schema for feature properties."""
     start_time = fields.DateTime(required=True)
     end_time = fields.DateTime(required=True)
-    resolution = fields.Str(load_default="60")
+    resolution = fields.Int(load_default=60)
     resolution_unit = fields.Str(load_default="minutes")
     buem = fields.Nested(BuemSchema, required=True)
 

@@ -32,6 +32,9 @@ dist/
 .vscode/
 .softwares/*
 
+# Ignoring results from the local run
+src/buem/results/*
+
 # Documentation builds and caches
 docs/build/
 docs/_build/

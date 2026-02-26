@@ -82,13 +82,13 @@
           "description": "Simulation end time"
         },
         "resolution": { 
-          "type": "string",
-          "default": "60",
+          "type":"integer",
+          "default": "1",
           "description": "Time resolution value"
         },
         "resolution_unit": { 
           "type": "string",
-          "default": "minutes",
+          "default": "hour",
           "description": "Time resolution unit"
         },
         "buem": { "$ref": "#/$defs/buem" }

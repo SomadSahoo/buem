@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Import validation if available
 try:
-    from buem.integration.geojson_validator import validate_geojson_request, create_validation_report
+    from buem.integration.scripts.geojson_validator import validate_geojson_request, create_validation_report
     VALIDATION_AVAILABLE = True
 except ImportError:
     VALIDATION_AVAILABLE = False

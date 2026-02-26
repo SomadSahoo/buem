@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from flask import current_app
 
-from buem.integration.attribute_builder import AttributeBuilder
-from buem.integration.geojson_validator import (
+from buem.integration.scripts.attribute_builder import AttributeBuilder
+from buem.integration.scripts.geojson_validator import (
     validate_geojson_request, 
     create_validation_report,
     ValidationLevel

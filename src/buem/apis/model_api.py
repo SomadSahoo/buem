@@ -10,7 +10,7 @@ from buem.main import run_model
 from buem.config.validator import validate_cfg
 
 # new import: integration processor
-from buem.integration.geojson_processor import GeoJsonProcessor
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 
 bp = Blueprint("model_api", __name__, url_prefix="/api")
 logger = logging.getLogger(__name__)

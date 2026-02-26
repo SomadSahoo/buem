@@ -25,14 +25,14 @@ import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from integration.geojson_validator import (
+    from buem.integration.scripts.geojson_validator import (
         validate_geojson_request, 
         create_validation_report,
         ValidationLevel,
         GeoJsonValidator
     )
-    from integration.debug_utils import BuemDebugger
-    from integration.geojson_processor import GeoJsonProcessor
+    from buem.integration.scripts.debug_utils import BuemDebugger
+    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure you're running from the correct directory and have all dependencies installed")

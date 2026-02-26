@@ -11,12 +11,12 @@ from datetime import datetime
 import logging
 import sys
 
-from buem.integration.geojson_validator import (
+from buem.integration.scripts.geojson_validator import (
     validate_geojson_request, 
     create_validation_report,
     ValidationLevel
 )
-from buem.integration.geojson_processor import GeoJsonProcessor
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 
 logger = logging.getLogger(__name__)
 
