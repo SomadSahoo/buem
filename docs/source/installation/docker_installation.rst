@@ -12,11 +12,15 @@ Quick Start with Docker Compose
     git clone https://github.com/your-org/buem.git
     cd buem
     
-    # Start BuEM services
-    docker-compose up -d
+    # Start BuEM services (builds automatically)
+    docker compose up
     
-    # Test the API
-    curl http://localhost:5000/health
+    # Test the API (in another terminal)
+    curl http://localhost:5000/api/health
+
+.. note::
+   Docker Compose will automatically build the image if it doesn't exist, 
+   so no separate build step is required.
 
 Docker Compose Configuration
 ----------------------------

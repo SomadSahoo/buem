@@ -26,8 +26,24 @@ Create the BuEM environment directly from the repository:
     # Activate environment
     conda activate buem_env
     
-    # Install BuEM in development mode
-    pip install -e .
+    # Ready to use! Run with:
+    python -m src.buem.main
+
+Building from Source (Advanced)
+-------------------------------
+
+To build and install with conda:
+
+.. code-block:: bash
+
+    conda install conda-build
+    conda build .
+    conda install --use-local buem
+
+.. note::
+   **Development Usage:** When using the conda environment with the source code, 
+   always prefix commands with ``src.`` (e.g., ``python -m src.buem.main``) to 
+   avoid import conflicts.
 
 Manual Environment Setup
 ------------------------
@@ -44,8 +60,8 @@ For custom environment configuration:
     conda install -c conda-forge numpy pandas scipy matplotlib
     conda install -c conda-forge requests flask gunicorn
     
-    # Install BuEM
-    pip install .
+    # For PyPI installation (alternative)
+    pip install buem
 
 Optional Dependencies
 ---------------------

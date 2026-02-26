@@ -24,11 +24,17 @@ Development Installation
     conda env create -f environment.yml
     conda activate buem_env
     
-    # Install in editable mode with dev dependencies
-    pip install -e .[dev]
+    # Install dev dependencies (optional)
+    pip install pytest pytest-cov black flake8 mypy
     
-    # Install pre-commit hooks
-    pre-commit install
+    # Install pre-commit hooks (optional)
+    # pip install pre-commit
+    # pre-commit install
+
+.. note::
+   **Important:** When working with the conda environment, always use ``python -m src.buem.main`` 
+   to run BUEM commands to avoid import path conflicts. The source code structure requires 
+   the ``src.`` prefix when importing modules directly from the repository.
 
 Code Quality Tools
 ------------------

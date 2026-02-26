@@ -3,7 +3,126 @@ Integration Examples
 
 Complete examples demonstrating BuEM API integration in various scenarios.
 
-Example 1: Basic Building Analysis
+Server Startup Examples
+-----------------------
+
+Starting the BuEM API Server
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**With Conda Environment:**
+
+.. code-block:: bash
+
+    conda activate buem_env
+    python -m src.buem.apis.api_server
+
+**With PyPI Installation:**
+
+.. code-block:: bash
+
+    python -m buem.apis.api_server
+
+**With Docker:**
+
+.. code-block:: bash
+
+    docker compose up
+
+Example 1: Basic API Calls
+--------------------------
+
+**Health Check**
+
+.. code-block:: bash
+
+    curl http://localhost:5000/api/health
+
+**Process GeoJSON File**
+
+.. code-block:: bash
+
+    curl -X POST "http://localhost:5000/api/process" \\
+       -H "Content-Type: application/json" \\
+       -d @src/buem/integration/json_schema/versions/v2/example_request.json
+
+**Run Building Model**
+
+.. code-block:: bash
+
+    curl -X POST "http://localhost:5000/api/run?include_timeseries=true" \\
+       -H "Content-Type: application/json" \\
+       --data-binary @payload.json
+
+Example 2: Postman Integration
+-----------------------------
+
+**Setup Steps:**
+
+1. Create a new request in Postman
+2. Set URL to ``http://localhost:5000/api/process``
+3. Method: ``POST``
+4. Headers: ``Content-Type: application/json``
+5. Body:
+
+   - For GeoJSON: Choose ``binary`` and upload GeoJSON file
+   - For JSON config: Choose ``raw`` → ``JSON`` and paste the configuration
+6. Optional: Add ``?include_timeseries=true`` for full time series
+7. Send request and inspect JSON response
+
+Example 3: Python Helper Tool
+-----------------------------
+
+BUEM includes a Python helper for testing:
+
+.. code-block:: bash
+
+    python -m src.buem.integration.send_geojson.py \\
+        src/buem/integration/sample_request_template.geojson \\
+        --include-timeseries
+
+Example 4: Result Forwarding
+----------------------------
+
+Include a ``forward_url`` in your JSON payload to automatically send results to another service:
+
+.. code-block:: json
+
+    {
+       "forward_url": "https://example.com/receiver",
+       "include_timeseries": false,
+       "use_milp": false,
+       "building_attributes": {
+           "latitude": 52.0,
+           "longitude": 5.0,
+           ...
+       }
+    }
+
+Example 5: File Downloads
+-------------------------
+
+Download saved result files (large time series data):
+
+.. code-block:: bash
+
+    # Files are saved with pattern: buem_ts_<hex>.json.gz
+    curl -O http://localhost:5000/api/files/buem_ts_abc123def.json.gz
+
+Environment Configuration
+------------------------
+
+**Environment Variables:**
+
+- ``BUEM_LOG_FILE`` - Log file path (default: ``logs/buem_api.log``)
+- ``BUEM_RESULTS_DIR`` - Results directory (default: ``results/``)
+
+**Troubleshooting:**
+
+- If logs aren't visible, set ``BUEM_LOG_FILE`` to a writable path
+- Ensure ``BUEM_RESULTS_DIR`` exists for file downloads
+- Server binds to ``0.0.0.0:5000`` by default
+
+Example 6: Basic Building Analysis
 ----------------------------------
 
 **Python Client Example**

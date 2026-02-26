@@ -16,6 +16,15 @@ This documentation is **developer-oriented** for teams integrating BuEM with:
 
 ### **Target Audience**: Software developers building energy analysis pipelines
 
+## 🚀 **Quick Start**
+
+**Installation Methods:**
+- **Conda Environment** (recommended): `conda env create -f environment.yml`
+- **PyPI**: `pip install buem`  
+- **Docker**: `docker compose up`
+
+**Important**: When using conda environment, run commands with `python -m src.buem.main` to avoid import conflicts.
+
 ---
 
 ## 📖 **Documentation Structure**
