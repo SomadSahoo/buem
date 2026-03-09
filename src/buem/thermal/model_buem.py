@@ -12,14 +12,27 @@ from buem.config.validator import validate_cfg
 
 class ModelBUEM(object):
     """
-    Parameterized ISO-13790 5R1C building model.
-    
-    Key aspects:
-    - Use of the following input modules: Occupancy, weather, and 3D-building + Tabula
-    - Output: Heating and cooling load at a building level with hourly resolution
-    - Consideration of pvlib python package for calculating solar gains
-    - Following building components' consideration: walls, roofs, windows, doors, and floor
-    - solve with scipy (equality) or cvxpy (inequalities)
+    ISO 13790 simplified hourly 5R1C building energy model.
+
+    Computes annual heating and cooling demand at hourly resolution using a
+    single-pass dead-band formulation solved as a Linear Programme (LP).
+
+    Key aspects
+    -----------
+    - **Physics**: 5R1C thermal network (air / surface / mass nodes) with
+      ISO 13790 §C.2 gain distribution (Schütz et al. 2017 Eqs. 20-22).
+    - **Inputs**: Weather (TMY), structured building components (walls, roof,
+      floor, windows, doors), occupancy profiles, internal/electrical gains.
+    - **Solar gains**: Plane-of-array irradiance via pvlib (isotropic sky model);
+      window transmittance and opaque effective collecting area per ISO 13790 §11.3.2.
+    - **Solver**: L1-norm objective (min Σ|Q_HC|) → LP solved by CLARABEL
+      (interior-point, OSQP fallback). Produces sparse Q_HC with exact dead-band
+      zeros when indoor temperature stays within comfort bounds passively.
+    - **MILP path** (experimental): Binary-variable formulation separating
+      Q_heat / Q_cool via CBC / GLPK / PuLP.
+    - **Periodicity**: Wrap-around mass-node dynamics (T_m(n-1) → T_m(0))
+      enforce annual-periodic thermal mass temperature without an arbitrary
+      initial condition.
     """
     CONST = {
         # specific heat transfer coefficient between internal air and surface [kW/m²K]
@@ -52,17 +65,22 @@ class ModelBUEM(object):
 
     def __init__(self, cfg: dict, maxLoad: float = None):
         """
-        Initialize model instance and declare cross-method attributes.
+        Initialise the model and declare cross-method attributes.
 
         Parameters
         ----------
-        cfg: dict
-            Configuration / attributes 
-            (expected keys: 'weather', 'building_components', etc.)
-        maxLoad: float, optional 
-            (default: DesignHeatLoad)
-            Maximal load of the heating system.
-
+        cfg : dict
+            Building configuration.  Required top-level keys include
+            ``'weather'`` (DataFrame with DNI/DHI/GHI/T), ``'components'``
+            (structured wall/roof/floor/window/door definitions with U-values
+            and element areas), ``'A_ref'``, ``'h_room'``, ``'thermalClass'``,
+            ``'c_m'``, ``'comfortT_lb'``, ``'comfortT_ub'``, ``'Q_ig'``,
+            ``'elecLoad'``, ``'occ_nothome'``, ``'occ_sleeping'``,
+            ``'n_air_infiltration'``, ``'n_air_use'``, solar/shading factors,
+            and geographic coordinates (``'latitude'``, ``'longitude'``).
+        maxLoad : float, optional
+            Override for maximum heating system capacity [kW].
+            If *None*, computed from :meth:`calcDesignHeatLoad`.
         """
         self.cfg = cfg 
         self.maxLoad = maxLoad
@@ -108,7 +126,8 @@ class ModelBUEM(object):
 
     # -------- utilities --------
     def _cfg_float(self, key, required=True):
-        """Consistent float read helper for cfg values - NO DEFAULTS."""
+        """Return ``cfg[key]`` as a float.  Raises ``ValueError`` if *required*
+        and the key is missing or unconvertible."""
         if key not in self.cfg:
             if required:
                 raise ValueError(f"Required configuration key '{key}' missing from cfg")
@@ -130,9 +149,7 @@ class ModelBUEM(object):
             
     # -------- parameter parsing --------
     def _initPara(self):
-        """
-        Ensure required dictionaries/lists are present before building parameters.
-        """
+        """Ensure ``self.profiles`` and ``self.profilesEval`` dicts exist."""
         if not hasattr(self, "profiles"):
             self.profiles = {}
         if not hasattr(self, "profilesEval"):
@@ -140,11 +157,26 @@ class ModelBUEM(object):
 
     def _initEnvelop(self):
         """
-        Parse structured cfg['components'] and populate:
-          - self.component_elements (dict)
-          - self.bU (component-level U)
-          - self.bH (aggregated conductances)
-        Raises ValueError if components are missing or invalid.
+        Parse ``cfg['components']`` and compute per-component conductances.
+
+        Populates
+        ---------
+        self.component_elements : dict[str, list[dict]]
+            Element dicts (id, area, azimuth, tilt, …) keyed by component name.
+        self.bU : dict[str, float | None]
+            Component-level U-value [W/m²K], or *None* when per-element U was used.
+        self.bH : dict[str, dict[str, float]]
+            Aggregated conductance ``bH[comp]['Original']`` [kW/K].
+            Ventilation conductance is derived from ``n_air_infiltration``,
+            ``n_air_use``, ``A_ref``, ``h_room``, and air properties.
+
+        Falls back to legacy ``A_<Comp>`` / ``U_<Comp>`` keys when the
+        structured ``components`` dict is absent.
+
+        Raises
+        ------
+        ValueError
+            If required components, U-values, or areas are missing or invalid.
         """
         comps = self.cfg.get("components")
 
@@ -302,11 +334,31 @@ class ModelBUEM(object):
     # -------- 5R1C & solar --------        
     def _init5R1C(self):
         """
-        Compute 5R1C thermal parameters and build solar gain profiles.
-        - Thermal capacity: uses cfg['thermalClass'] to derive c_m and A_m per ISO/DIN table.
-        - Compute POA irradiance per element from self.component_elements (via pvlib).
-        - Build and store time series in self.profiles:
-            bQ_sol_Windows, bQ_sol_Walls, bQ_sol_Roof, bQ_sol_Opaque
+        Compute ISO 13790 5R1C thermal network parameters and build solar gain
+        profiles.
+
+        Derived quantities stored on *self*:
+
+        - ``bA_f``  – heated floor area [m²] (= A_ref)
+        - ``bA_m``  – effective mass area [m²] (= A_ref × f_a(thermalClass))
+        - ``bH_ms`` – mass–surface conductance [kW/K] (= A_m × h_ms)
+        - ``bC_m``  – internal heat capacity [kWh/K] (= A_ref × c_m / 3600)
+        - ``bA_tot``– total internal surface area [m²] (= A_ref × λ_at)
+        - ``bH_is`` – surface–air conductance [kW/K] (= A_tot × h_is)
+        - ``bT_comf_lb / bT_comf_ub`` – dead-band comfort bounds [°C]
+
+        Solar gain profiles stored in ``self.profiles``:
+
+        - ``bQ_sol_Windows``  – window solar gains [kW] (incl. sky radiation correction)
+        - ``bQ_sol_Walls``    – wall + door opaque solar gains [kW]
+        - ``bQ_sol_Roof``     – roof opaque solar gains [kW]
+        - ``bQ_sol_Floor``    – zero by design (floor faces down)
+        - ``bQ_sol_Opaque``   – walls + roof + floor combined [kW]
+
+        Window gains use ``g_gl × (1−F_f) × F_w × POA``.
+        Opaque gains use ISO 13790 §11.3.2: ``A_sol = α × R_se × U × A``.
+        POA irradiance is computed via pvlib (isotropic sky model) in
+        :meth:`_calcRadiation`.
         """
         # store constants reference
         self.bConst = self.CONST
@@ -531,12 +583,29 @@ class ModelBUEM(object):
         print(f"Peak window solar: {self.profiles['bQ_sol_Windows'].max():.2f} kW")
         print(f"Peak opaque solar: {self.profiles['bQ_sol_Opaque'].max():.2f} kW")
 
-    def _calcRadiation(self, surf_az:dict, surf_tilt:dict):
+    def _calcRadiation(self, surf_az: dict, surf_tilt: dict):
         """
-        Compute plane-of-array (POA) irradiance for each surface element via pvlib.
-        Results assigned to self._irrad_surf[col = element id] in kW/m2.
-        This implementation iterates all configured elements so _irrad_surf is
-        always populated for use by the solar-gain routines.
+        Compute plane-of-array (POA) irradiance for every building surface
+        element using pvlib's isotropic sky diffuse model.
+
+        Parameters
+        ----------
+        surf_az : dict[str, float]
+            Element-id → surface azimuth [°] (pvlib convention: 0=N, 180=S).
+        surf_tilt : dict[str, float]
+            Element-id → surface tilt [°] (0=horizontal-up, 90=vertical).
+
+        Side effects
+        ------------
+        Populates ``self._irrad_surf`` (DataFrame, cols = element ids,
+        values = POA global irradiance in **kW/m²**).
+
+        Notes
+        -----
+        - DNI is clipped to extraterrestrial irradiance to suppress
+          low-sun-angle blow-ups common in NWP-derived weather data.
+        - Floor elements receive 0 (downward-facing, no solar exposure).
+        - A hard 1200 W/m² cap is applied as a physical guard.
         """
         # compute solar position and helpers - NO DEFAULTS for coordinates
         if "latitude" not in self.cfg:
@@ -642,7 +711,11 @@ class ModelBUEM(object):
     # -------- design load --------
     def calcDesignHeatLoad(self) -> float:
         """
-        Approximate design heat load [kW]. Uses aggregated conductances (self.bH).
+        Approximate steady-state design heating load [kW].
+
+        Uses the total aggregated conductance ``H_tot`` and an assumed indoor–
+        outdoor design temperature difference (default 22.917 K unless
+        ``cfg['design_T_min']`` is set).
         """
         # ensure envelope parsed
         if not self.bH:
@@ -656,8 +729,12 @@ class ModelBUEM(object):
 
     def _addPara(self):
         """
-        Prepare additional parameters and subsets required for optimization/simulation.
-        Calls _initEnvelop and _init5R1C to ensure derived profiles and bH are available.
+        Initialise all parameters, envelope, 5R1C network, solar profiles, and
+        sizing (``maxLoad``).  Also computes big-M bounds for legacy MILP
+        formulations.
+
+        Calls :meth:`_initPara`, :meth:`_initEnvelop`, :meth:`_init5R1C`,
+        and :meth:`calcDesignHeatLoad`.
         """
 
         self._initPara()
@@ -698,34 +775,36 @@ class ModelBUEM(object):
                 self.bM_q[comp][state] = high
                 self.bm_q[comp][state] = low
 
-    def _addVariables(self):   
-        """
-        Declare placeholders for variable containers used by other methods.
-        This method does not create solver variables; it sets up dicts/lists only.
-        """
+    def _addVariables(self):
+        """Declare placeholder dicts for per-timestep variable containers
+        (temperatures, heat flows). These are **not** solver decision variables;
+        they are populated during post-processing or by legacy code paths."""
 
-        self.bQ_comp = {}  # Heat flow through components 
+        self.bQ_comp = {}  # per-component heat flow [kW]
 
-        # define/declare auxiliary variable for modeling heat flow on thermal mass surface
+        # auxiliary variable for thermal mass surface heat flow (legacy)
         self.bP_X = {}
 
-        # temperatures variables
-        self.bT_m = {}  # thermal mass node temperature
-        self.bT_air = {}  # air node temperature
-        self.bT_s = {}  # surface node temperature
+        # temperature dicts (legacy per-timestep containers)
+        self.bT_m = {}   # thermal mass node [°C]
+        self.bT_air = {} # air node [°C]
+        self.bT_s = {}   # surface node [°C]
 
-        # heat flow variables
-        self.bQ_ia = {}  # heat flow to air node [kW]
-        self.bQ_m = {}  # heat flow to thermal mass node [kW]
-        self.bQ_st = {}  # heat flow to surface node [kW]
+        # heat-flow dicts (legacy per-timestep containers)
+        self.bQ_ia = {}  # convective gains to air node [kW]
+        self.bQ_m = {}   # radiative gains to mass node [kW]
+        self.bQ_st = {}  # radiative gains to surface node [kW]
 
-        # ventilation heat flow
-        self.bQ_ve = {}  # heat flow through ventilation [kW]         
+        # ventilation
+        self.bQ_ve = {}  # ventilation heat flow [kW]         
                                     
     def scaleHeatLoad(self, scale=1):
         """
-        Scale original U-values and infiltration rates by `scale` to obtain relative heat loads.
-        Saves original values on first call.
+        Multiply original U-values and air-change rates by *scale*.
+
+        On first call the current values are saved; subsequent calls re-scale
+        from those saved originals so that ``scaleHeatLoad(1)`` always restores
+        the initial state.
         """
         if not hasattr(self, "_orig_U_Values"):
             self._orig_U_Values = {}
@@ -742,33 +821,57 @@ class ModelBUEM(object):
     # -------- constraints & solver --------
     def _addConstraints(self):
         """
-        Build 5R1C physics equality constraints for all timesteps.
+        Build the 5R1C physics equality-constraint system for all timesteps.
 
-        Variable order (n = number of timesteps):
-          x = [T_air_0..T_air_{n-1}, T_m_0..T_m_{n-1}, T_sur_0..T_sur_{n-1}, Q_HC_0..Q_HC_{n-1}]
-        n_vars = 4*n.  A_eq has shape (3*n, 4*n) — three physics equations per timestep:
-          1. Air node balance    (H_is + H_ve)*T_air - H_is*T_sur - Q_HC = Q_air + H_ve*T_e
-          2. Surface node balance
-          3. Mass node forward-Euler dynamics
+        Variable layout (n = number of hourly timesteps, typically 8760)::
 
-        Comfort bounds  T_lb <= T_air <= T_ub  are applied as variable bounds in sim_model,
-        enabling the ISO 52016 single-pass dead-band QP solve (no separate heating/cooling
-        runs needed).
+            x = [T_air(0…n-1), T_m(0…n-1), T_sur(0…n-1), Q_HC(0…n-1)]
+
+        Three equality constraints per timestep (total 3n rows, 4n columns):
+
+        1. **Air-node balance** (Schütz Eq. 22)::
+
+               (H_is + H_ve) T_air − H_is T_sur − Q_HC = φ_ia + H_ve T_e
+
+        2. **Surface-node balance** (Schütz Eq. 21)::
+
+               (H_is + H_ms + H_win) T_sur − H_is T_air − H_ms T_m
+                   = φ_st + H_win T_e
+
+        3. **Mass-node forward-Euler dynamics** (Schütz Eq. 20)::
+
+               (C_m/Δt) T_m(i+1) + (−C_m/Δt + H_ms + H_tr_em) T_m(i)
+                   − H_ms T_sur(i) = H_tr_em T_e(i) + φ_m(i)
+
+           with wrap-around ``T_m(n−1) → T_m(0)`` for annual periodicity.
+
+        Gain distribution follows ISO 13790 §C.2::
+
+            φ_ia = 0.5 × φ_int                          (convective → air)
+            φ_st = f_st × (0.5 × φ_int + φ_sol)       (radiative → surface)
+            φ_m  = f_Am × (0.5 × φ_int + φ_sol)       (radiative → mass)
+
+        Comfort bounds ``T_lb ≤ T_air ≤ T_ub`` are applied as LP variable
+        bounds in :meth:`sim_model`, not here.
 
         Returns
         -------
-        A_eq : sparse (3*n, 4*n)
-        b_eq : ndarray (3*n,)
-        milp_meta : dict  — passed to _build_and_solve_milp when use_milp=True
+        A_eq : scipy.sparse matrix (3n × 4n)
+        b_eq : ndarray (3n,)
+        milp_meta : dict
+            Compact parameter bundle forwarded to :meth:`_build_and_solve_milp`
+            when ``use_milp=True``.
         """
         n = len(self.timeIndex)
         self.n_vars = 4 * n  # [T_air, T_m, T_sur, Q_HC] per timestep
         return self._addConstraints_sequential()
 
     def _addConstraints_sequential(self):
-        """Build 3 physics equality constraints per timestep (air node, surface node, mass dynamics).
-        Returns (A_eq, b_eq, milp_meta) — A_eq is 3*n x 4*n (non-square).
-        Comfort bounds are NOT included here; sim_model applies them as QP variable bounds."""
+        """Assemble the 3n × 4n sparse equality system row by row.
+
+        Called by :meth:`_addConstraints`.  See its docstring for the full
+        equation reference.  Returns ``(A_eq, b_eq, milp_meta)``.
+        """
         n = len(self.timeIndex)
         
         # Helper to get variable indices
@@ -776,14 +879,12 @@ class ModelBUEM(object):
         def idx_T_m(i): return n + i
         def idx_T_sur(i): return 2 * n + i
         def idx_Q_HC(i): return 3 * n + i
-        # def idx_Q_cool(i): return 4 * n + i
 
         # Prepare equality constraint lists
         eq_rows, eq_vals = [], []
 
-        # aggregated conductances from self.bH (Original state)
-        # Required components: raise clearly if conductance was not calculated.
-        # Optional components (Windows, Doors): use 0.0 if absent (not all buildings have them).
+        # Aggregated conductances from self.bH['Original'].
+        # Required components raise if missing; optional (Windows, Doors) default to 0.
         for _req in ("Walls", "Roof", "Floor", "Ventilation"):
             if _req not in self.bH or "Original" not in self.bH[_req]:
                 raise ValueError(
@@ -799,12 +900,10 @@ class ModelBUEM(object):
         H_windows = self.bH["Windows"]["Original"] if "Windows" in self.bH and "Original" in self.bH["Windows"] else 0.0
         H_doors   = self.bH["Doors"]["Original"]   if "Doors"   in self.bH and "Original" in self.bH["Doors"]   else 0.0
 
-        # Total transmission (all components) and opaque-only transmission for mass node.
-        # All values are floats (0.0 for absent optional components), so no None checks needed.
+        # Total transmission conductance and opaque-only mass-node conductance.
         H_tot = H_ve + H_walls + H_roofs + H_floors + H_windows + H_doors
-        # H_tr_em: ISO 13790 §12.2.2 — mass node couples to exterior through opaque components ONLY.
-        # H_ve (ventilation) connects T_air <-> T_e; H_windows connects T_sur <-> T_e.
-        # Neither belongs in the mass-node thermal balance.
+        # H_tr_em: mass node couples to exterior through opaque components only
+        # (ISO 13790 §12.2.2).  H_ve → air node; H_windows → surface node.
         H_tr_em = H_walls + H_roofs + H_floors + H_doors
         print(f"H_tot={H_tot:.4f} kW/K, H_tr_em={H_tr_em:.4f} kW/K (mass node), H_ve={H_ve:.4f}, H_windows={H_windows:.4f}")
         
@@ -812,16 +911,25 @@ class ModelBUEM(object):
         if H_tot <= 0.001:  # Less than 1 W/K is unrealistic
             raise ValueError(f"Total transmission conductance too low: {H_tot:.6f} kW/K. Check building envelope definition.")
 
-        #mass-surface and surface-air conductances 
+        #mass–surface and surface–air conductances
         C_m = self.bC_m
         H_ms = self.bH_ms
-        # H_is must be calculated in _init5R1C - NO FALLBACKS
+        # H_is must have been set by _init5R1C
         if not hasattr(self, "bH_is") or self.bH_is is None:
             raise ValueError("H_is conductance not calculated. Call _init5R1C first.")
         H_is = self.bH_is
 
         step = self.stepSize
         sleeping_factor = 0.5
+
+        # ISO 13790 §C.2 gain distribution fractions
+        # f_Am: fraction of radiative gains absorbed by thermal mass
+        # f_w:  fraction of radiative gains lost directly through windows
+        # f_st: remainder reaching internal surfaces
+        f_Am = self.bA_m / self.bA_tot
+        f_w  = H_windows / (self.bConst["h_ms"] * self.bA_tot)  # h_ms in kW/m²K
+        f_st = max(0.0, 1.0 - f_Am - f_w)
+        print(f"ISO 13790 §C.2 gain fractions: f_Am={f_Am:.3f}, f_st={f_st:.3f}, f_w={f_w:.4f}")
 
         # use precomputed solar profiles from _init5R1C - NO FALLBACKS
         if "bQ_sol_Windows" not in self.profiles or "bQ_sol_Opaque" not in self.profiles or "bQ_ig" not in self.profiles:
@@ -832,17 +940,18 @@ class ModelBUEM(object):
         if "occ_nothome" not in self.profiles or "occ_sleeping" not in self.profiles:
             raise ValueError("Occupancy profiles not set in self.profiles. Call sim_model or _addPara first.")
         
-        # arrays for milp_meta
+        # Per-timestep gain arrays (also forwarded in milp_meta)
         Q_air_list = np.zeros(n)
         Q_surface_list = np.zeros(n)
+        Q_mass_list = np.zeros(n)
         T_e_list = np.zeros(n)
 
-        # Main loop for Building equations
+        # Build constraint rows for each timestep
         for i, (t1, t2) in enumerate(self.timeIndex):
             Q_sol_win = float(Q_win_profile[i])
             Q_sol_opaque = float(Q_opaque_profile[i])
 
-            # internal gains and occupancy - NO pd.Series(0) fallbacks
+            # Internal gains modulated by occupancy
             if isinstance(self.profiles.get("occ_nothome"), dict):
                 occ = 1 - self.profiles["occ_nothome"][(t1, t2)]
             else:
@@ -856,27 +965,34 @@ class ModelBUEM(object):
 
             T_e = self.profiles["T_e"][(t1, t2)] if isinstance(self.profiles.get("T_e"), dict) else float(self.cfg["weather"]["T"].iloc[i])
             
-            # split solar gains: 50% to air, 50% to surface (ISO simplification)
-            # Solar gains are already computed in _init5R1C - no additional sol-air effects needed
-            Q_air = Q_ia + 0.5 * Q_sol_win
-            Q_surface = Q_sol_opaque + 0.5 * Q_sol_win
+            # ISO 13790 §C.2 gain distribution (Schütz et al. 2017 Eqs. 20-22)
+            # φ_int = total internal gains;  φ_sol = total solar gains (window + opaque)
+            phi_int = Q_ia
+            phi_sol = Q_sol_win + Q_sol_opaque
+            phi_ia  = 0.5 * phi_int                         # convective → air node
+            phi_st  = f_st * (0.5 * phi_int + phi_sol)      # radiative → surface node
+            phi_m   = f_Am * (0.5 * phi_int + phi_sol)      # radiative → mass node
 
+            Q_air = phi_ia
+            Q_surface = phi_st
 
-            # store for MILP meta
+            # Store per-timestep values for milp_meta
             Q_air_list[i] = Q_air
             Q_surface_list[i] = Q_surface
+            Q_mass_list[i] = phi_m
             T_e_list[i] = T_e
 
-            # 1) Air node balance: (H_is + H_ve) * T_air - H_is * T_sur - Q_HC = Q_air + H_ve * T_e
+            # 1) Air node balance (Schütz Eq. 22):
+            #   (H_is + H_ve) T_air - H_is T_sur - Q_HC = φ_ia + H_ve T_e
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_air(i)] = H_is + H_ve
             row[0, idx_T_sur(i)] = -H_is
             row[0, idx_Q_HC(i)] = -1
-            # row[0, idx_Q_cool(i)] = -1
             eq_rows.append(row)
             eq_vals.append(Q_air + H_ve * T_e)
 
-            # 2) Surface node balance: (H_is + H_ms + H_windows) * T_sur - H_is * T_air - H_ms * T_m = Q_surface + H_windows * T_e
+            # 2) Surface node balance (Schütz Eq. 21):
+            #   (H_is + H_ms + H_win) T_sur - H_is T_air - H_ms T_m = φ_st + H_win T_e
             row = lil_matrix((1, self.n_vars))
             row[0, idx_T_sur(i)] = H_is + H_ms + H_windows
             row[0, idx_T_air(i)] = -H_is
@@ -884,38 +1000,33 @@ class ModelBUEM(object):
             eq_rows.append(row)
             eq_vals.append(Q_surface + H_windows * T_e)  
 
-            # 3) Mass node dynamics (implicit-forward Euler):
-            # C_m * (T_m_next - T_m)/step = H_ms*(T_sur - T_m) - H_tot*(T_m - T_e)
-            if i == 0:
+            # 3) Mass node dynamics (ISO 13790 forward Euler, annual-periodic):
+            # C_m/step*(T_m(i+1) - T_m(i)) = φ_m + H_ms*(T_sur(i)-T_m(i)) + H_tr_em*(T_e(i)-T_m(i))
+            # Rearranged to A*x=b:
+            #   (C_m/step)*T_m(i+1) + (-C_m/step+H_ms+H_tr_em)*T_m(i) + (-H_ms)*T_sur(i) = H_tr_em*T_e + φ_m
+            # For i=n-1 the "next" T_m wraps to T_m(0) — this enforces annual periodicity without
+            # an explicit initial condition, letting the solver find the self-consistent periodic state.
+            if i < n - 1:
                 row = lil_matrix((1, self.n_vars))
-                # Initial condition: T_m starts at comfort dead-band midpoint
-                row[0, idx_T_m(i)] = 1
-                eq_rows.append(row)
-                eq_vals.append(self.T_set)
-
-            elif i < n - 1:
-                row = lil_matrix((1, self.n_vars))
-                # ISO 13790: mass node couples to exterior through opaque components only (H_tr_em)
-                # Ventilation (H_ve) connects T_air↔T_e; windows (H_windows) connect T_sur↔T_e
-                row[0, idx_T_m(i)] = -C_m / step - H_ms - H_tr_em
                 row[0, idx_T_m(i+1)] = C_m / step
-                row[0, idx_T_sur(i)] = H_ms
+                row[0, idx_T_m(i)]   = -C_m / step + H_ms + H_tr_em
+                row[0, idx_T_sur(i)] = -H_ms
                 eq_rows.append(row)
-                eq_vals.append(-H_tr_em * T_e)             
-            
+                eq_vals.append(H_tr_em * T_e + phi_m)
             else:
-                # Periodic boundary: T_m at last = T_m at first
+                # Wrap-around: same dynamics with T_m(n-1) → T_m(0)
                 row = lil_matrix((1, self.n_vars))
-                row[0, idx_T_m(i)] = -1
-                row[0, idx_T_m(0)] = 1
+                row[0, idx_T_m(0)]   = C_m / step
+                row[0, idx_T_m(i)]   = -C_m / step + H_ms + H_tr_em
+                row[0, idx_T_sur(i)] = -H_ms
                 eq_rows.append(row)
-                eq_vals.append(0)
+                eq_vals.append(H_tr_em * T_e + phi_m)
 
         # --- Assemble equality matrix  A_eq (3*n x 4*n) ---
         A_eq = vstack(eq_rows) if eq_rows else None
         b_eq = np.array(eq_vals) if eq_vals else None
 
-        # milp_meta: compact parameter bundle used only by _build_and_solve_milp
+        # milp_meta: parameter bundle forwarded to _build_and_solve_milp
         try:
             design = max(1.0, float(self.calcDesignHeatLoad()))
         except Exception:
@@ -938,6 +1049,7 @@ class ModelBUEM(object):
             "step": step,
             "Q_air": Q_air_list,
             "Q_surface": Q_surface_list,
+            "Q_mass": Q_mass_list,
             "T_e": T_e_list,
             "M_array": M_array,
         }
@@ -946,10 +1058,19 @@ class ModelBUEM(object):
 
     def _ensure_milp_solver(self):
         """
-        Discover MILP solver. Return tuple (cvxpy_solver_or_None, cbc_exe_path_or_None, glpsol_path_or_None).
+        Discover an available MILP solver for :meth:`_build_and_solve_milp`.
 
-        - If cvxpy exposes a MILP-capable solver (CBC or GLPK_MI) return that constant as first element.
-        - Otherwise return (None, cbc_path, glpsol_path) so callers can fall back to external executable (PuLP).
+        Returns
+        -------
+        (cvxpy_solver | None, cbc_exe_path | None, glpsol_path | None)
+            If cvxpy exposes a MILP-capable solver (CBC or GLPK_MI) the first
+            element is its ``cp.*`` constant.  Otherwise ``None`` and the caller
+            falls back to PuLP with the discovered executable paths.
+
+        Side effects
+        ------------
+        - Loads ``.env`` variables (``BUEM_CBC_EXE``, ``BUEM_CBC_DIR``).
+        - Prepends vendor/softwares directories to ``PATH``.
         """
         pkg_dir = os.path.dirname(__file__)
         # search for .env up to a few levels and load it (python-dotenv)
@@ -1027,8 +1148,20 @@ class ModelBUEM(object):
 
     def _build_and_solve_milp(self, milp_meta):
         """
-        Build & solve MILP from milp_meta. Use cvxpy solver if available;
-        otherwise fall back to PuLP + external CBC executable (path from _ensure_milp_solver).
+        Build and solve the MILP formulation (experimental).
+
+        Separates heating (``Q_heat ≥ 0``) and cooling (``Q_cool ≥ 0``) with a
+        binary indicator ``y`` and big-M constraints to prevent simultaneous
+        heating and cooling.  Objective: ``min Σ (Q_heat + Q_cool)``.
+
+        Uses cvxpy's built-in MILP solver if available; otherwise falls back to
+        PuLP + external CBC executable.
+
+        Parameters
+        ----------
+        milp_meta : dict
+            Parameter bundle from :meth:`_addConstraints` containing
+            conductances, gain arrays, temperature arrays, and big-M values.
         """
         n = int(milp_meta["n"])
         H_is = float(milp_meta["H_is"])
@@ -1144,24 +1277,36 @@ class ModelBUEM(object):
 
     def sim_model(self, use_milp: bool = False):
         """
-        ISO 52016-1 single-pass dead-band simulation of the 5R1C building model.
+        Run the ISO 13790 single-pass dead-band simulation.
 
-        A single QP (quadratic programme) replacing the former two-pass (heating + cooling)
-        approach. T_air is allowed to float freely within the comfort dead-band
-        [comfortT_lb, comfortT_ub] provided in cfg. Q_HC is the net HVAC power:
+        Builds the 5R1C equality system via :meth:`_addConstraints` and solves
+        a Linear Programme (LP) with an L1-norm objective::
 
-            Q_HC > 0  →  heating required (T_air hit lower comfort bound)
-            Q_HC < 0  →  cooling required (T_air hit upper comfort bound)
-            Q_HC = 0  →  free-floating; no HVAC needed (comfort satisfied passively)
+            min  Σ |Q_HC(i)|          (total HVAC energy)
+            s.t. A_eq · x = b_eq     (physics)
+                 T_lb ≤ T_air ≤ T_ub  (dead-band comfort)
 
-        Objective: min Σ Q_HC²  (drives Q_HC to zero in dead-band hours, minimises
-        HVAC energy globally). Solved with OSQP (sparse convex QP solver).
+        The L1 norm is reformulated internally by cvxpy into a standard LP
+        (auxiliary variables t_i ≥ ±Q_HC_i).  This produces **sparse**
+        solutions: Q_HC = 0 whenever indoor temperature can remain within the
+        comfort band passively — matching real thermostat dead-band behaviour.
+
+        Solver priority: CLARABEL (interior-point) → OSQP (ADMM fallback).
+
+        After solving, near-zero Q_HC values (|Q_HC| < 1 W) are snapped to
+        exactly zero to eliminate solver numerical noise.
 
         Parameters
         ----------
         use_milp : bool, optional
-            If True, run the MILP solver instead of the QP.  Default False.
-            Note: MILP path is experimental and requires an external solver (CBC/GLPK).
+            If *True*, delegates to :meth:`_build_and_solve_milp` instead of
+            the LP path.  Default *False*.
+
+        Side effects
+        ------------
+        Sets ``self.T_air``, ``self.T_m``, ``self.T_sur``, ``self.Q_HC``,
+        ``self.heating_load``, ``self.cooling_load``, and populates
+        ``self.detailedResults``.
         """
         issues = validate_cfg(self.cfg)
         if issues:
@@ -1194,26 +1339,36 @@ class ModelBUEM(object):
         if use_milp:
             return self._build_and_solve_milp(milp_meta)
 
-        # ── Single-pass ISO 52016 dead-band QP ──────────────────────────────────
+        # ── Single-pass ISO 13790 dead-band LP ──────────────────────────────────
         # Variables: x = [T_air(0..n-1), T_m(0..n-1), T_sur(0..n-1), Q_HC(0..n-1)]
         # Equality:  3 physics equations per timestep
         # Bounds:    comfortT_lb <= T_air <= comfortT_ub  (dead-band comfort constraint)
-        # Objective: minimize sum(Q_HC^2)
+        # Objective: minimize sum(|Q_HC|)  (L1 norm → LP)
         n = len(self.timeIndex)
         x = cp.Variable(4 * n)
-        obj = cp.Minimize(cp.sum_squares(x[3*n:4*n]))
+        # L1 objective: minimize total |Q_HC| (= total HVAC energy).
+        # Sparse solution: Q_HC = 0 (dead-band) whenever physics admits T_air ∈ [lb, ub].
+        # This matches ISO 13790 annual energy accounting (total kWh, not peak kW).
+        obj = cp.Minimize(cp.norm1(x[3*n:4*n]))
         constraints = [
             A_eq @ x == b_eq,
             x[0:n] >= self.bT_comf_lb,
             x[0:n] <= self.bT_comf_ub,
         ]
         prob = cp.Problem(obj, constraints)
-        print(f"Solving QP: {4*n} vars, A_eq {A_eq.shape}, "
+        print(f"Solving LP: {4*n} vars, A_eq {A_eq.shape}, "
               f"comfort [{self.bT_comf_lb}, {self.bT_comf_ub}] degC ...")
-        prob.solve(solver=cp.OSQP, eps_abs=1e-6, eps_rel=1e-6, max_iter=10000, verbose=False)
+        # Try CLARABEL (interior-point, high accuracy) first; fall back to OSQP
+        try:
+            prob.solve(solver=cp.CLARABEL, verbose=False)
+            solver_used = "CLARABEL"
+        except Exception:
+            prob.solve(solver=cp.OSQP, eps_abs=1e-6, eps_rel=1e-6, max_iter=10000, verbose=False)
+            solver_used = "OSQP"
+        print(f"Solver: {solver_used}, status: {prob.status}")
         if prob.status not in ["optimal", "optimal_inaccurate"]:
             raise RuntimeError(
-                f"QP solver failed (status={prob.status}). "
+                f"LP solver failed (status={prob.status}, solver={solver_used}). "
                 "Check building parameters (U-values, areas) and comfort bounds."
             )
 
@@ -1222,6 +1377,9 @@ class ModelBUEM(object):
         self.T_m   = x_val[n:2*n]
         self.T_sur = x_val[2*n:3*n]
         self.Q_HC  = x_val[3*n:4*n]
+
+        # Snap near-zero Q_HC to exactly zero (numerical noise in dead-band hours)
+        self.Q_HC[np.abs(self.Q_HC) < 1e-3] = 0.0  # |Q_HC| < 1 W → 0
 
         # Split net HVAC by sign: positive = heating, negative = cooling
         self.heating_load = np.maximum(0.0, self.Q_HC)
@@ -1232,8 +1390,12 @@ class ModelBUEM(object):
 
     def _readResults(self):
         """
-        Extracts results as a pandas dataframe.
-        Populate detailedResults dataframe
+        Populate ``self.detailedResults`` DataFrame and legacy plotting attributes.
+
+        Columns: Heating Load, Cooling Load, T_air, T_sur, T_m, T_e,
+        Electricity Load.  Also sets ``Q_sol_win_series`` and
+        ``Q_sol_opaque_series`` for downstream plotting, and calls
+        :meth:`diagnostics_solar_components`.
         """
 
         self.detailedResults = pd.DataFrame({
@@ -1246,8 +1408,7 @@ class ModelBUEM(object):
             "Electricity Load": self.cfg["elecLoad"].values if "elecLoad" in self.cfg else None,
         }, index=[t for t in self.timeIndex]
         )
-        # Provide legacy/plotting-friendly attributes expected by standard_plots
-        # Use profiles produced in _init5R1C; fall back to zero arrays if missing
+        # Legacy/plotting-friendly attributes expected by standard_plots
         self.Q_sol_win_series = np.asarray(self.profiles.get("bQ_sol_Windows", np.zeros(len(self.times))))
         print(f"Solar gains windows: {self.Q_sol_win_series.sum()}")
         self.Q_sol_opaque_series = np.asarray(self.profiles.get("bQ_sol_Opaque", np.zeros(len(self.times))))
@@ -1263,10 +1424,16 @@ class ModelBUEM(object):
 
     def diagnostics_solar_components(self):
         """
-        Print and return diagnostics for solar terms and component geometry:
-        - per-component total area
-        - mean POA (kW/m2) across elements
-        - H (kW/K), H * R_se, thermal_rad (kW) and profile sums (kWh)
+        Print and return per-component diagnostic summary.
+
+        For each component reports: total area [m²], mean POA [kW/m²],
+        conductance H [kW/K], ``H×R_se``, sky thermal radiation correction
+        [kW], and annual solar gain profile sum [kWh].
+
+        Returns
+        -------
+        dict[str, dict]
+            Nested dict keyed by component name.
         """
         det = {}
         R_se = float(self.bConst.get("R_se", 0.0))

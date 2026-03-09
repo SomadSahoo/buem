@@ -12,8 +12,8 @@ from buem.weather.from_csv import CsvWeatherData
 from .attribute_types import AttributeCategory, AttrType, AttributeSpec
 
 # --- changed code: make weather CSV path configurable via BUEM_WEATHER_DIR env var ---
-# Default to package-local data folder if env var is not set so behavior is backwards-compatible.
-DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+# Default to package-local data/weather folder if env var is not set so behavior is backwards-compatible.
+DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "weather"))
 WEATHER_DIR = os.environ.get("BUEM_WEATHER_DIR", DEFAULT_DATA_DIR)
 WEATHER_CSV = os.path.join(WEATHER_DIR, "COSMO_Year__ix_390_650.csv")
 

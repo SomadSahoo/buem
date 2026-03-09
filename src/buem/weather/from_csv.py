@@ -6,8 +6,15 @@ import numpy as np
 class CsvWeatherData:
     def __init__(self, csv_relative_path=None, cache_path=None):
         buem_root = Path(__file__).parent.parent
-        self.csv_path = buem_root / csv_relative_path
-        self.cache_path = buem_root / cache_path if cache_path else None
+        # If the caller passes an absolute path (e.g. from env var), use it
+        # directly; otherwise treat it as relative to the package root.
+        _csv = Path(csv_relative_path)
+        self.csv_path = _csv if _csv.is_absolute() else buem_root / csv_relative_path
+        if cache_path:
+            _cp = Path(cache_path)
+            self.cache_path = _cp if _cp.is_absolute() else buem_root / cache_path
+        else:
+            self.cache_path = None
         self.df = self._load_and_prepare()
 
     def _load_and_prepare(self):

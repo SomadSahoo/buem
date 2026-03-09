@@ -83,17 +83,17 @@ class PlotVariables:
         
         # 1. Temperature plot
         ax1 = fig.add_subplot(gs[0])
-        ax1.plot(time_hours, model_heat.T_air[:n_hours], label='Air Temperature', linewidth=2)
-        ax1.plot(time_hours, model_heat.T_m[:n_hours], label='Mass Temperature', linewidth=2)
-        ax1.plot(time_hours, model_heat.T_sur[:n_hours], label='Surface Temperature', linewidth=2)
-        
+        ax1.plot(time_hours, model_heat.T_m[:n_hours], label='Mass Temperature', color='blue', linewidth=2)
+        ax1.plot(time_hours, model_heat.T_sur[:n_hours], label='Surface Temperature', color='green', linewidth=2)
+        ax1.plot(time_hours, model_heat.T_air[:n_hours], label='Air Temperature', color='red', linewidth=2)        
+
         # Add comfort bounds
         ax1.axhline(y=model_heat.cfg["comfortT_lb"], color='r', linestyle='--', alpha=0.5, label='Min Comfort')
         ax1.axhline(y=model_heat.cfg["comfortT_ub"], color='r', linestyle='--', alpha=0.5, label='Max Comfort')
 
         # Add external temperature
         T_e = [model_heat.profiles.get("T_e", {}).get((1, t), np.nan) for t in range(n_hours)]
-        ax1.plot(time_hours, T_e, label='External Temperature', color='gray', alpha=0.5)
+        ax1.plot(time_hours, T_e, label='External Temperature', color='yellow', alpha=0.5)
         
         ax1.set_ylabel('Temperature [°C]', fontsize=18)
         ax1.set_title(f'Building Temperatures ({period}) [A]', fontsize=20, pad=20)
