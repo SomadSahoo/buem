@@ -5,16 +5,17 @@ Parallel Building Processing Module for BUEM
 This module implements parallel processing capabilities for multiple building energy models,
 allowing efficient processing of thousands of buildings using multiprocessing.
 
+The thermal model uses a single-pass LP solver (CLARABEL) that simultaneously determines
+heating and cooling demand via a dead-band formulation. Building-level parallelism is
+achieved by distributing buildings across worker processes.
+
 Key Features:
-- Parallel processing using multiprocessing.Pool
+- Parallel processing using ProcessPoolExecutor
 - Configurable process count based on CPU cores
 - Progress tracking and performance monitoring
 - Error handling and recovery for individual buildings
 - Memory optimization for large building datasets
 - Detailed timing and performance metrics
-- Support for different processing strategies (batch, streaming)
-- Enhanced thermal calculation strategies (sequential vs parallel heating/cooling)
-- Building ID validation to prevent heating/cooling mismatches
 
 Usage:
     # Basic parallel processing
@@ -22,18 +23,8 @@ Usage:
     
     processor = ParallelBuildingProcessor(workers=8)
     results = processor.process_buildings(building_files)
-    
-    # Advanced configuration with thermal strategies
-    processor = ParallelBuildingProcessor(
-        workers=8,
-        thermal_strategy='parallel',
-        thermal_workers=4,
-        timeout=300
-    )
-    results = processor.process_buildings(building_files)
 
 Requirements:
-    - multiprocessing (built-in)
     - concurrent.futures (built-in Python 3.2+)
     - psutil (optional, for advanced system monitoring)
 """
@@ -42,28 +33,38 @@ import json
 import time
 import logging
 import traceback
-import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any, Union
 from datetime import datetime, timezone
-from multiprocessing import Pool, cpu_count, Manager
+from multiprocessing import cpu_count
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
-import sys
-import os
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
+from buem.integration import validate_request_file
+from buem.main import run_model
+from buem.config.cfg_building import CfgBuilding
 
-# Add the project root to Python path for imports
-project_root = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(project_root / "src"))
 
-try:
-    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
-    from buem.integration import validate_request_file
-    from buem.main import run_model
-    from buem.config.cfg_building import CfgBuilding
-except ImportError as e:
-    print(f"Error importing BUEM modules: {e}")
-    print("Make sure BUEM is properly installed and the path is correct.")
-    sys.exit(1)
+def _worker_init():
+    """
+    Worker initializer called once per spawned process.
+
+    On Windows the 'spawn' start-method creates a fresh Python interpreter for each
+    worker.  Pre-importing the heavy modules here (cvxpy, numpy, pandas, and the
+    BUEM config stack) moves that one-time cost into pool creation rather than into the
+    first ``process_single_building`` call.
+
+    The import of ``buem.config.cfg_attribute`` also triggers the weather-data load.
+    Because the main process has already created the feather cache, the workers read
+    the fast binary feather file (~50 ms) instead of parsing the CSV and running the
+    pvlib DISC decomposition (~2-3 s).
+    """
+    # Heavy numerics / solver
+    import numpy          # noqa: F401
+    import pandas         # noqa: F401
+    import cvxpy          # noqa: F401
+
+    # BUEM config stack (triggers weather feather-cache read via cfg_attribute)
+    from buem.config import cfg_attribute        # noqa: F401
 
 # Configure logging
 logging.basicConfig(
@@ -81,265 +82,14 @@ except ImportError:
     logger.warning("psutil not available - system monitoring will be limited")
 
 
-def process_single_building_enhanced(building_file: Union[str, Path], thermal_strategy: str = 'sequential', 
-                                   thermal_workers: int = 2) -> Dict[str, Any]:
-    """
-    Process a single building file with enhanced thermal calculation strategies.
-    
-    This function implements parallel heating and cooling calculations when thermal_strategy='parallel'.
-    It ensures proper building matching between heating and cooling results.
-    
-    Parameters
-    ----------
-    building_file : Union[str, Path]
-        Path to the building configuration JSON file
-    thermal_strategy : str
-        Strategy for thermal calculations: 'sequential' or 'parallel'
-    thermal_workers : int
-        Number of workers for parallel thermal calculations
-        
-    Returns
-    -------
-    Dict[str, Any]
-        Enhanced processing results with thermal strategy information
-    """
-    start_time = time.time()
-    building_file = Path(building_file)
-    
-    try:
-        # Load building configuration
-        with building_file.open('r') as f:
-            building_data = json.load(f)
-        
-        # Extract building ID
-        if 'features' in building_data and building_data['features']:
-            building_id = building_data['features'][0].get('id', building_file.stem)
-        else:
-            building_id = building_file.stem
-        
-        logger.info(f"Processing building: {building_id} (thermal: {thermal_strategy})")
-        
-        # Validate the building configuration
-        validation_result = validate_request_file(building_file)
-        if not validation_result:
-            return {
-                'building_id': building_id,
-                'success': False,
-                'error': f"Validation failed",
-                'processing_time': time.time() - start_time,
-                'file_path': str(building_file),
-                'thermal_strategy': thermal_strategy
-            }
-        
-        # Enhanced processing based on thermal strategy
-        if thermal_strategy == 'parallel':
-            response = process_building_parallel_thermal(building_data, building_id, thermal_workers)
-        else:
-            response = process_building_sequential_thermal(building_data, building_id)
-        
-        processing_time = time.time() - start_time
-        
-        # Extract enhanced summary results
-        summary_stats = {}
-        thermal_breakdown = {}
-        
-        if 'features' in response and response['features']:
-            feature = response['features'][0]
-            if 'properties' in feature and 'buem' in feature['properties']:
-                thermal_profile = feature['properties']['buem'].get('thermal_load_profile', {})
-                summary_stats = thermal_profile.get('summary', {})
-                
-                # Extract heating/cooling breakdown if available
-                thermal_breakdown = {
-                    'heating_load_kwh': summary_stats.get('heating_load_kwh', 0),
-                    'cooling_load_kwh': summary_stats.get('cooling_load_kwh', 0),
-                    'total_load_kwh': summary_stats.get('total_load_kwh', 0),
-                    'peak_heating_kw': summary_stats.get('peak_heating_kw', 0),
-                    'peak_cooling_kw': summary_stats.get('peak_cooling_kw', 0)
-                }
-        
-        return {
-            'building_id': building_id,
-            'success': True,
-            'results': response,
-            'summary_stats': summary_stats,
-            'thermal_breakdown': thermal_breakdown,
-            'processing_time': processing_time,
-            'file_path': str(building_file),
-            'thermal_strategy': thermal_strategy,
-            'thermal_workers': thermal_workers if thermal_strategy == 'parallel' else 1,
-            'metadata': {
-                'processed_at': datetime.now(timezone.utc).isoformat(),
-                'validation_passed': validation_result,
-                'thermal_strategy_used': thermal_strategy
-            }
-        }
-        
-    except Exception as e:
-        processing_time = time.time() - start_time
-        error_msg = f"Error processing {building_file}: {str(e)}"
-        logger.error(f"{error_msg}\\n{traceback.format_exc()}")
-        
-        return {
-            'building_id': building_file.stem,
-            'success': False,
-            'error': error_msg,
-            'processing_time': processing_time,
-            'file_path': str(building_file),
-            'thermal_strategy': thermal_strategy,
-            'metadata': {
-                'processed_at': datetime.now(timezone.utc).isoformat(),
-                'validation_passed': False,
-                'traceback': traceback.format_exc(),
-                'thermal_strategy': thermal_strategy
-            }
-        }
-
-
-def process_building_parallel_thermal(building_data: Dict[str, Any], building_id: str, 
-                                    thermal_workers: int) -> Dict[str, Any]:
-    """Process building with parallel heating and cooling calculations."""
-    from concurrent.futures import ThreadPoolExecutor
-    import copy
-    
-    logger.debug(f"Starting parallel thermal processing for {building_id} with {thermal_workers} workers")
-    
-    # Create separate copies for heating and cooling calculations
-    heating_data = copy.deepcopy(building_data)
-    cooling_data = copy.deepcopy(building_data)
-    
-    # Process heating and cooling in parallel with proper building ID maintenance
-    with ThreadPoolExecutor(max_workers=thermal_workers) as executor:
-        try:
-            # Submit both thermal calculations
-            heating_future = executor.submit(
-                calculate_thermal_loads, heating_data, building_id, 'heating'
-            )
-            cooling_future = executor.submit(
-                calculate_thermal_loads, cooling_data, building_id, 'cooling'
-            )
-            
-            # Collect results ensuring building ID consistency
-            heating_result = heating_future.result(timeout=120)
-            cooling_result = cooling_future.result(timeout=120)
-            
-            # Validate building ID consistency
-            heating_building_id = extract_building_id(heating_result)
-            cooling_building_id = extract_building_id(cooling_result)
-            
-            if heating_building_id != cooling_building_id or heating_building_id != building_id:
-                raise ValueError(f"Building ID mismatch: expected {building_id}, got heating={heating_building_id}, cooling={cooling_building_id}")
-            
-            # Merge results ensuring no building mismatch
-            merged_result = merge_thermal_results(heating_result, cooling_result, building_id)
-            
-            logger.debug(f"Successfully completed parallel thermal processing for {building_id}")
-            return merged_result
-            
-        except TimeoutError:
-            logger.error(f"Thermal calculation timeout for {building_id}")
-            raise TimeoutError(f"Thermal calculations timed out for building {building_id}")
-
-
-def process_building_sequential_thermal(building_data: Dict[str, Any], building_id: str) -> Dict[str, Any]:
-    """Process building with traditional sequential thermal calculations."""
-    logger.debug(f"Starting sequential thermal processing for {building_id}")
-    
-    # Use existing GeoJsonProcessor for sequential processing
-    processor = GeoJsonProcessor(
-        payload=building_data,
-        include_timeseries=False
-    )
-    
-    # Run the processing
-    response = processor.process()
-    
-    logger.debug(f"Completed sequential thermal processing for {building_id}")
-    return response
-
-
-def calculate_thermal_loads(building_data: Dict[str, Any], building_id: str, 
-                          load_type: str) -> Dict[str, Any]:
-    """Calculate thermal loads for a specific type (heating or cooling)."""
-    logger.debug(f"Calculating {load_type} loads for {building_id}")
-    
-    # For now, use the existing processor
-    # In future versions, this could be enhanced to separate heating/cooling calculations
-    processor = GeoJsonProcessor(
-        payload=building_data,
-        include_timeseries=False
-    )
-    
-    result = processor.process()
-    
-    # Tag result with load type and building ID for verification
-    if 'features' in result and result['features']:
-        result['features'][0]['load_type'] = load_type
-        result['features'][0]['building_id_verified'] = building_id
-    
-    logger.debug(f"Completed {load_type} calculation for {building_id}")
-    return result
-
-
-def extract_building_id(thermal_result: Dict[str, Any]) -> str:
-    """Extract building ID from thermal calculation result."""
-    if 'features' in thermal_result and thermal_result['features']:
-        return thermal_result['features'][0].get('building_id_verified', 
-                thermal_result['features'][0].get('id', 'unknown'))
-    return 'unknown'
-
-
-def merge_thermal_results(heating_result: Dict[str, Any], cooling_result: Dict[str, Any], 
-                        building_id: str) -> Dict[str, Any]:
-    """Merge heating and cooling results ensuring building consistency."""
-    logger.debug(f"Merging thermal results for {building_id}")
-    
-    # Use heating result as base and merge cooling data
-    merged_result = copy.deepcopy(heating_result)
-    
-    # Ensure building ID consistency
-    if 'features' in merged_result and merged_result['features']:
-        merged_result['features'][0]['id'] = building_id
-        merged_result['features'][0]['building_id'] = building_id
-        
-        # Merge thermal properties if available
-        if 'properties' in merged_result['features'][0]:
-            props = merged_result['features'][0]['properties']
-            
-            # Add parallel processing metadata
-            if 'buem' not in props:
-                props['buem'] = {}
-            
-            props['buem']['thermal_processing'] = {
-                'strategy': 'parallel',
-                'building_id': building_id,
-                'heating_calculated': True,
-                'cooling_calculated': True,
-                'merged_at': datetime.now(timezone.utc).isoformat()
-            }
-    
-    logger.debug(f"Successfully merged thermal results for {building_id}")
-    return merged_result
-
-
-def process_building_wrapper(args):
-    """Wrapper function for enhanced building processing with thermal strategies."""
-    building_file, thermal_strategy, thermal_workers = args
-    return process_single_building_enhanced(building_file, thermal_strategy, thermal_workers)
-
-
 def process_single_building(building_file: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Process a single building file and return results (backwards compatibility).
-    
-    This function maintains backwards compatibility while using enhanced processing.
-    """
-    return process_single_building_enhanced(building_file, 'sequential', 1)
     """
     Process a single building file and return results.
     
     This function is designed to work in a multiprocessing environment.
     It handles all the necessary imports and error handling for individual building processing.
+    The thermal model uses a single-pass LP solver (CLARABEL) that simultaneously
+    determines heating and cooling demand.
     
     Parameters
     ----------
@@ -379,40 +129,76 @@ def process_single_building(building_file: Union[str, Path]) -> Dict[str, Any]:
             return {
                 'building_id': building_id,
                 'success': False,
-                'error': f"Validation failed",
+                'error': "Validation failed",
                 'processing_time': time.time() - start_time,
                 'file_path': str(building_file)
             }
         
-        # Process with GeoJsonProcessor
+        # Process with GeoJsonProcessor (uses single-pass LP solver internally)
         processor = GeoJsonProcessor(
             payload=building_data,
-            include_timeseries=False  # Set to True if you need detailed timeseries
+            include_timeseries=False
         )
-        
-        # Run the processing
         response = processor.process()
         
         processing_time = time.time() - start_time
         
+        # Check response metadata for processing errors
+        resp_meta = response.get('metadata', {})
+        failed_features = resp_meta.get('failed_features', 0)
+        total_features = resp_meta.get('total_features', 0)
+        
+        if failed_features > 0 and failed_features == total_features:
+            # All features failed — report the building as failed
+            errors = response.get('validation_report', {}).get('processing_errors', [])
+            error_msg = '; '.join(errors) if errors else 'All features failed during processing'
+            return {
+                'building_id': building_id,
+                'success': False,
+                'error': error_msg,
+                'processing_time': processing_time,
+                'file_path': str(building_file),
+                'metadata': {
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'validation_passed': validation_result,
+                    'failed_features': failed_features,
+                    'total_features': total_features
+                }
+            }
+        
         # Extract summary results
         summary_stats = {}
+        thermal_breakdown = {}
         if 'features' in response and response['features']:
             feature = response['features'][0]
             if 'properties' in feature and 'buem' in feature['properties']:
                 thermal_profile = feature['properties']['buem'].get('thermal_load_profile', {})
                 summary_stats = thermal_profile.get('summary', {})
+                thermal_breakdown = {
+                    'heating_load_kwh': summary_stats.get('heating_load_kwh', 0),
+                    'cooling_load_kwh': summary_stats.get('cooling_load_kwh', 0),
+                    'total_load_kwh': summary_stats.get('total_load_kwh', 0),
+                    'peak_heating_kw': summary_stats.get('peak_heating_kw', 0),
+                    'peak_cooling_kw': summary_stats.get('peak_cooling_kw', 0)
+                }
+        
+        # Partial success: some features failed
+        has_partial_errors = failed_features > 0
         
         return {
             'building_id': building_id,
             'success': True,
+            'partial_errors': has_partial_errors,
             'results': response,
             'summary_stats': summary_stats,
+            'thermal_breakdown': thermal_breakdown,
             'processing_time': processing_time,
             'file_path': str(building_file),
             'metadata': {
                 'processed_at': datetime.now(timezone.utc).isoformat(),
-                'validation_passed': validation_result
+                'validation_passed': validation_result,
+                'failed_features': failed_features,
+                'total_features': total_features
             }
         }
         
@@ -460,8 +246,6 @@ class ParallelBuildingProcessor:
         chunk_size: int = 5,
         timeout: float = 300.0,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        thermal_strategy: str = 'parallel',
-        thermal_workers: int = 2
     ):
         """
         Initialize the parallel processor.
@@ -476,22 +260,18 @@ class ParallelBuildingProcessor:
             Timeout for individual building processing in seconds (default: 300)
         progress_callback : Optional[Callable]
             Callback function called with (completed_count, total_count)
-        thermal_strategy : str
-            Strategy for thermal calculations: 'parallel' (recommended) or 'sequential'
-            'parallel' provides significant speedup on multi-core systems
-        thermal_workers : int
-            Number of workers for thermal calculations (heating/cooling)
         """
-        self.workers = workers or min(16, max(1, cpu_count() - 1))  # Optimize for 16-core systems
+        # Optimal worker count ≈ 60% of logical cores for CPU-bound LP workloads.
+        # This approximates the physical core count on hybrid P/E architectures
+        # and avoids excessive context-switching overhead.  Benchmark on a 22-core
+        # Intel Ultra 7 165H showed 10 workers optimal for 15 buildings.
+        self.workers = workers or min(16, max(2, int(cpu_count() * 0.6)))
         self.chunk_size = chunk_size
         self.timeout = timeout
         self.progress_callback = progress_callback
-        self.thermal_strategy = thermal_strategy
-        self.thermal_workers = thermal_workers
         
-        logger.info(f"🚀 Initialized ParallelBuildingProcessor with {self.workers} workers")
-        logger.info(f"💡 Thermal strategy: {thermal_strategy}, thermal workers: {thermal_workers}")
-        logger.info(f"📊 Optimized for {cpu_count()}-core system")
+        logger.info(f"Initialized ParallelBuildingProcessor with {self.workers} workers")
+        logger.info(f"Optimized for {cpu_count()}-core system")
         
         if PSUTIL_AVAILABLE:
             memory_info = psutil.virtual_memory()
@@ -545,27 +325,25 @@ class ParallelBuildingProcessor:
             performance_metrics['initial_memory_mb'] = initial_memory
         
         try:
-            # Use ProcessPoolExecutor for better control over process lifecycle
-            with ProcessPoolExecutor(max_workers=self.workers) as executor:
-                # Submit all jobs with enhanced thermal processing
-                if self.thermal_strategy == 'parallel':
-                    # Use enhanced processing with thermal strategies
-                    future_to_file = {
-                        executor.submit(
-                            process_building_wrapper,
-                            (building_file, self.thermal_strategy, self.thermal_workers)
-                        ): building_file
-                        for building_file in building_files
-                    }
-                else:
-                    # Use standard processing for sequential thermal strategy
-                    future_to_file = {
-                        executor.submit(
-                            process_building_wrapper,
-                            (building_file, 'sequential', 1)
-                        ): building_file
-                        for building_file in building_files
-                    }
+            # Ensure the feather weather cache exists before spawning workers.
+            # The import triggers cfg_attribute module-level code which either reads
+            # the existing cache or creates it from CSV + pvlib DISC.
+            from buem.config import cfg_attribute  # noqa: F401
+            logger.info("Weather feather cache ready — workers will load from cache")
+
+            # Use ProcessPoolExecutor for better control over process lifecycle.
+            # _worker_init pre-imports heavy modules (cvxpy, numpy, pandas, buem model
+            # stack) in each spawned process so the first building doesn't pay the
+            # import cost (~3-5 s on Windows with 'spawn' start method).
+            with ProcessPoolExecutor(
+                max_workers=self.workers,
+                initializer=_worker_init,
+            ) as executor:
+                # Submit all building jobs
+                future_to_file = {
+                    executor.submit(process_single_building, building_file): building_file
+                    for building_file in building_files
+                }
                 
                 # Process completed jobs as they finish
                 completed_count = 0
@@ -660,7 +438,10 @@ class ParallelBuildingProcessor:
         
         # Save results if requested
         if save_results:
-            results_file = results_file or f"parallel_processing_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            if not results_file:
+                results_dir = Path(__file__).resolve().parent.parent / "results"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                results_file = str(results_dir / f"parallel_processing_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(results_file, 'w') as f:
                 json.dump(results, f, indent=2, default=str)
             logger.info(f"Results saved to: {results_file}")
@@ -686,7 +467,7 @@ def demo_parallel_processing():
     the previously created dummy building configurations.
     """
     # Find dummy building files
-    dummy_dir = Path(__file__).parent.parent / "integration/json_schema/versions/v2/dummy"
+    dummy_dir = Path(__file__).parent.parent / "data/buildings/dummy"
     building_files = list(dummy_dir.glob("*.json"))
     
     if not building_files:
@@ -700,9 +481,8 @@ def demo_parallel_processing():
         progress = (completed / total) * 100
         logger.info(f"Progress: {completed}/{total} ({progress:.1f}%)")
     
-    # Create processor with different configurations for comparison
+    # Create processor with auto-detected worker count
     processor = ParallelBuildingProcessor(
-        workers=4,  # Use 4 workers for demonstration
         chunk_size=2,
         timeout=120.0,
         progress_callback=progress_handler

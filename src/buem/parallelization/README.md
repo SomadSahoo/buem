@@ -28,7 +28,7 @@ src/buem/parallelization/
 Five diverse building configurations are provided for testing:
 
 ```
-src/buem/integration/json_schema/versions/v2/dummy/
+src/buem/data/buildings/dummy/
 ├── building_01_small_residential.json    # 80 m² residential building
 ├── building_02_medium_office.json        # 250 m² office building
 ├── building_03_large_commercial.json     # 500 m² commercial building

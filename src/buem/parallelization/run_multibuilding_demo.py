@@ -57,18 +57,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add the project root to Python path for imports
-project_root = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(project_root / "src"))
-
-try:
-    from buem.parallelization.parallel_run import ParallelBuildingProcessor, demo_parallel_processing
-    from buem.parallelization.sequence_run import SequentialBuildingProcessor, demo_sequential_processing
-    from buem.parallelization.performance_comparison import PerformanceComparator, demo_performance_comparison
-except ImportError as e:
-    print(f"Error importing processing modules: {e}")
-    print("Make sure all processing modules are available in the parallelization folder.")
-    sys.exit(1)
+from buem.parallelization.parallel_run import ParallelBuildingProcessor, demo_parallel_processing
+from buem.parallelization.sequence_run import SequentialBuildingProcessor, demo_sequential_processing
+from buem.parallelization.performance_comparison import PerformanceComparator, demo_performance_comparison
 
 
 def print_banner():
@@ -111,13 +102,13 @@ def check_dependencies():
 
 def check_dummy_buildings() -> List[Path]:
     """Check for dummy building files and create them if missing."""
-    dummy_dir = Path(__file__).parent.parent / "integration/json_schema/versions/v2/dummy"
+    dummy_dir = Path(__file__).parent.parent / "data/buildings/dummy"
     building_files = list(dummy_dir.glob("*.json"))
     
     if not building_files:
         logger.warning("No dummy building files found!")
         logger.info("Please run the individual scripts to create dummy buildings first.")
-        logger.info("Expected location: src/buem/integration/json_schema/versions/v2/dummy/")
+        logger.info("Expected location: src/buem/data/buildings/dummy/")
         return []
     
     logger.info(f"Found {len(building_files)} dummy building files:")
@@ -326,8 +317,7 @@ def generate_summary_report(results):
     print("="*80)
 
 
-def validate_system_parameters(cores: Optional[int] = None, workers: Optional[int] = None, 
-                             thermal_workers: Optional[int] = None) -> Tuple[bool, Dict[str, Any], str]:
+def validate_system_parameters(cores: Optional[int] = None, workers: Optional[int] = None) -> Tuple[bool, Dict[str, Any], str]:
     """Validate system parameters and provide recommendations."""
     system_info = get_system_info()
     max_cores = system_info['cpu_cores']['logical']
@@ -356,16 +346,6 @@ def validate_system_parameters(cores: Optional[int] = None, workers: Optional[in
     else:
         recommendations['workers'] = min(max_cores // 2, 8)
     
-    # Validate thermal workers
-    if thermal_workers is not None:
-        if thermal_workers < 1:
-            errors.append("Thermal workers must be >= 1")
-        elif thermal_workers > 4:  # Limit for thermal calculations
-            errors.append(f"Thermal workers ({thermal_workers}) should not exceed 4 for optimal performance")
-        recommendations['thermal_workers'] = min(thermal_workers, 4)
-    else:
-        recommendations['thermal_workers'] = min(4, max_cores // 4)
-    
     # Memory validation
     estimated_memory_per_building = 0.5  # GB estimate
     concurrent_buildings = recommendations.get('workers', 4)
@@ -379,7 +359,6 @@ def validate_system_parameters(cores: Optional[int] = None, workers: Optional[in
 Valid parameter ranges for your system:
   --cores: 1 to {max_cores} (recommended: {recommendations['cores']})
   --workers: 1 to {max_cores} (recommended: {recommendations['workers']})
-  --thermal-workers: 1 to 4 (recommended: {recommendations['thermal_workers']})
 
 System specs: {max_cores} logical cores, {system_info['cpu_cores']['physical']} physical cores, {max_memory_gb}GB RAM
 """
@@ -436,19 +415,18 @@ def run_optimization_tests(building_files: List[Path]) -> Dict[str, Any]:
     system_info = get_system_info()
     max_cores = system_info['cpu_cores']['logical']
     
-    # Test configurations
+    # Test configurations (varying worker counts)
     test_configs = [
-        {'workers': 2, 'thermal_strategy': 'parallel', 'desc': '2 Workers + Parallel Thermal'},
-        {'workers': 4, 'thermal_strategy': 'parallel', 'desc': '4 Workers + Parallel Thermal'},
-        {'workers': 4, 'thermal_strategy': 'parallel', 'desc': '4 Workers + Parallel Thermal + Chunked'},
-        {'workers': 8, 'thermal_strategy': 'parallel', 'desc': '8 Workers + Parallel Thermal + Chunked'},
-        {'workers': min(12, max_cores), 'thermal_strategy': 'parallel', 'desc': f'{min(12, max_cores)} Workers + Parallel Thermal + Chunked'},
+        {'workers': 2, 'desc': '2 Workers'},
+        {'workers': 4, 'desc': '4 Workers'},
+        {'workers': 8, 'desc': '8 Workers'},
+        {'workers': min(12, max_cores), 'desc': f'{min(12, max_cores)} Workers'},
     ]
     
     # Add high-performance config if system supports it
     if max_cores >= 16:
         test_configs.append({
-            'workers': 16, 'thermal_strategy': 'parallel', 'desc': '16 Workers + Parallel Thermal + Chunked (High-Performance)'
+            'workers': 16, 'desc': '16 Workers (High-Performance)'
         })
     
     results = []
@@ -514,16 +492,15 @@ def run_optimization_tests(building_files: List[Path]) -> Dict[str, Any]:
         return {
             'optimal_config': None,
             'all_results': results,
-            'recommendation': {'workers': 4, 'thermal_strategy': 'sequential'}  # Safe fallback
+            'recommendation': {'workers': 4}  # Safe fallback
         }
 
 
-def run_enhanced_parallel_demo(workers: int, thermal_strategy: str = 'sequential', 
-                             thermal_workers: int = 2):
-    """Run parallel demo with enhanced configuration options."""
+def run_enhanced_parallel_demo(workers: int):
+    """Run parallel demo with specified worker count."""
     print("\\n" + "🚀" * 20)
     print(f"ENHANCED PARALLEL PROCESSING DEMONSTRATION")
-    print(f"Workers: {workers} | Thermal Strategy: {thermal_strategy} | Thermal Workers: {thermal_workers}")
+    print(f"Workers: {workers}")
     print("🚀" * 20)
     
     building_files = check_dummy_buildings()
@@ -535,70 +512,62 @@ def run_enhanced_parallel_demo(workers: int, thermal_strategy: str = 'sequential
         from buem.parallelization.parallel_run import ParallelBuildingProcessor
         
         processor = ParallelBuildingProcessor(
-            workers=workers,
-            thermal_strategy=thermal_strategy,
-            thermal_workers=thermal_workers
+            workers=workers
         )
         results = processor.process_buildings(building_files)
         
-        logger.info("✅ Enhanced parallel processing demonstration completed successfully")
+        logger.info("Enhanced parallel processing demonstration completed successfully")
         return results
     except Exception as e:
-        logger.error(f"❌ Enhanced parallel processing demonstration failed: {e}")
+        logger.error(f"Enhanced parallel processing demonstration failed: {e}")
         return None
 
 
-def run_thermal_strategy_tests():
-    """Test different thermal calculation strategies."""
+def run_worker_scaling_tests():
+    """Test building processing with different worker counts to find optimal scaling."""
     print("\\n" + "🔥" * 20)
-    print("THERMAL STRATEGY TESTING")
+    print("WORKER SCALING TESTS")
     print("🔥" * 20)
     
     building_files = check_dummy_buildings()
     if not building_files:
-        logger.error("Cannot run thermal tests without building files")
+        logger.error("Cannot run scaling tests without building files")
         return None
     
-    strategies = ['sequential', 'parallel']
+    worker_counts = [1, 2, 4, 8]
     results = {}
     
-    for strategy in strategies:
-        logger.info(f"\\n🧪 Testing {strategy} thermal strategy...")
+    for workers in worker_counts:
+        logger.info(f"\\n Testing {workers} worker(s)...")
         try:
             from buem.parallelization.parallel_run import ParallelBuildingProcessor
             
             processor = ParallelBuildingProcessor(
-                workers=4,
-                thermal_strategy=strategy
+                workers=workers
             )
             
             # Use subset for testing
             test_buildings = building_files[:2]
             result = processor.process_buildings(test_buildings)
             
-            results[strategy] = {
+            results[workers] = {
                 'status': 'success',
                 'time': result['performance']['total_time'],
                 'rate': result['performance']['buildings_per_second'],
                 'success_rate': result['summary']['success_rate_percent']
             }
             
-            logger.info(f"   ✅ {strategy}: {result['performance']['total_time']:.2f}s, {result['performance']['buildings_per_second']:.2f} buildings/sec")
+            logger.info(f"   {workers} worker(s): {result['performance']['total_time']:.2f}s, {result['performance']['buildings_per_second']:.2f} buildings/sec")
             
         except Exception as e:
-            logger.error(f"   ❌ {strategy} failed: {e}")
-            results[strategy] = {'status': 'failed', 'error': str(e)}
+            logger.error(f"   {workers} worker(s) failed: {e}")
+            results[workers] = {'status': 'failed', 'error': str(e)}
     
     # Compare results
-    if all(r['status'] == 'success' for r in results.values()):
-        sequential_time = results['sequential']['time']
-        parallel_time = results['parallel']['time']
-        
-        if parallel_time < sequential_time:
-            speedup = sequential_time / parallel_time
-            logger.info(f"\\n🏆 Parallel thermal strategy is {speedup:.2f}x faster!")
-        else:
-            logger.info(f"\\n📊 Sequential thermal strategy performed better for this dataset")
+    successful = {k: v for k, v in results.items() if v['status'] == 'success'}
+    if len(successful) >= 2:
+        best_workers = max(successful, key=lambda k: successful[k]['rate'])
+        logger.info(f"\\n Best configuration: {best_workers} worker(s) at {successful[best_workers]['rate']:.2f} buildings/sec")
     
     return results
 
@@ -617,14 +586,9 @@ Examples:
   # Advanced parallelization
   python run_multibuilding_demo.py --test parallel --cores 8          # 8-core parallel processing
   python run_multibuilding_demo.py --test parallel --workers 4        # 4 worker processes
-  python run_multibuilding_demo.py --test parallel --thermal-workers 2 # 2 thermal calculation workers
   
   # Optimization and testing
   python run_multibuilding_demo.py --test optimize                    # Auto-find optimal configuration
-  python run_multibuilding_demo.py --test thermal                     # Test thermal calculation strategies
-  
-  # Combined configurations
-  python run_multibuilding_demo.py --test parallel --cores 16 --workers 8 --thermal-workers 4
   
   # System validation
   python run_multibuilding_demo.py --validate-system                  # Check system capabilities
@@ -633,9 +597,16 @@ Examples:
     
     parser.add_argument(
         '--test',
-        choices=['parallel', 'sequential', 'comparison', 'benchmark', 'complete', 'optimize', 'thermal'],
-        default='complete',
-        help='Specific test to run (default: complete demo)'
+        choices=['parallel', 'sequential', 'comparison', 'benchmark', 'complete', 'optimize'],
+        default='parallel',
+        help='Test mode to run (default: parallel only)'
+    )
+    
+    parser.add_argument(
+        '--buildings',
+        type=int,
+        default=None,
+        help='Maximum number of buildings to process (default: all available)'
     )
     
     parser.add_argument(
@@ -648,19 +619,6 @@ Examples:
         '--workers',
         type=int,
         help='Number of worker processes for building processing'
-    )
-    
-    parser.add_argument(
-        '--thermal-workers',
-        type=int,
-        help='Number of worker processes for thermal calculations within each building'
-    )
-    
-    parser.add_argument(
-        '--thermal-strategy',
-        choices=['sequential', 'parallel'],
-        default='parallel',  # Default to parallel for better performance
-        help='Strategy for heating/cooling calculations: sequential or parallel (default: parallel)'
     )
     
     parser.add_argument(
@@ -684,29 +642,27 @@ Examples:
     if args.validate_system:
         is_valid, recommendations, range_info = validate_system_parameters(
             cores=args.cores,
-            workers=args.workers,
-            thermal_workers=args.thermal_workers
+            workers=args.workers
         )
         
-        print("\\n" + "🔍" * 20)
+        print("\\n" + "=" * 40)
         print("SYSTEM VALIDATION RESULTS")
-        print("🔍" * 20)
+        print("=" * 40)
         
         system_info = get_system_info()
-        print(f"\\n💻 System Specifications:")
+        print(f"\\nSystem Specifications:")
         print(f"   CPU Cores: {system_info['cpu_cores']['logical']} logical, {system_info['cpu_cores']['physical']} physical")
         print(f"   Memory: {system_info['memory']['total_gb']} GB total, {system_info['memory']['available_gb']} GB available")
         if system_info.get('psutil_available'):
             print(f"   Memory Usage: {system_info['memory']['percent_used']:.1f}% used")
         
         if is_valid:
-            print(f"\\n✅ Configuration is valid!")
-            print(f"\\n🎯 Recommended settings:")
+            print(f"\\nConfiguration is valid!")
+            print(f"\\nRecommended settings:")
             print(f"   --cores {recommendations['cores']}")
             print(f"   --workers {recommendations['workers']}")
-            print(f"   --thermal-workers {recommendations['thermal_workers']}")
         else:
-            print(f"\\n❌ Configuration issues found:")
+            print(f"\\nConfiguration issues found:")
             print(f"{range_info}")
         
         sys.exit(0 if is_valid else 1)
@@ -714,12 +670,11 @@ Examples:
     # Validate parameters if provided
     is_valid, recommendations, error_msg = validate_system_parameters(
         cores=args.cores,
-        workers=args.workers,
-        thermal_workers=args.thermal_workers
+        workers=args.workers
     )
     
     if not is_valid:
-        print(f"\\n❌ Invalid parameters: {error_msg}")
+        print(f"\\nInvalid parameters: {error_msg}")
         sys.exit(1)
     
     # Apply validated parameters
@@ -730,12 +685,10 @@ Examples:
     
     start_time = time.time()
     
-    # Run the requested test with enhanced parameters
+    # Run the requested test
     if args.test == 'parallel':
         success = run_enhanced_parallel_demo(
-            workers=args.workers or recommendations['workers'],
-            thermal_strategy=args.thermal_strategy,
-            thermal_workers=args.thermal_workers or recommendations['thermal_workers']
+            workers=args.workers or recommendations['workers']
         ) is not None
     elif args.test == 'sequential':
         success = run_sequential_demo() is not None
@@ -745,13 +698,13 @@ Examples:
         success = run_benchmark_demo() is not None
     elif args.test == 'optimize':
         building_files = check_dummy_buildings()
+        if args.buildings is not None:
+            building_files = building_files[:args.buildings]
         if building_files:
             optimization_results = run_optimization_tests(building_files)
             success = optimization_results['optimal_config'] is not None
         else:
             success = False
-    elif args.test == 'thermal':
-        success = run_thermal_strategy_tests() is not None
     else:  # complete
         success = run_complete_demo()
     

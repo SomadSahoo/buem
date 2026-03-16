@@ -1,5 +1,4 @@
-import sys, os
-sys.path.insert(0, 'src')
+import os
 os.environ.setdefault('BUEM_WEATHER_DIR', os.path.abspath('src/buem/data'))
 
 from buem.config.cfg_attribute import cfg

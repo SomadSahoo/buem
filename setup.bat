@@ -74,17 +74,14 @@ echo   multibuilding --test sequential             Sequential processing only
 echo   multibuilding --test comparison             Parallel vs sequential comparison
 echo   multibuilding --test benchmark              Comprehensive benchmark suite
 echo   multibuilding --test optimize               Auto-find optimal configuration
-echo   multibuilding --test thermal                Test thermal calculation strategies
 echo   multibuilding --buildings 20                Process 20 buildings
 echo   multibuilding --workers N                   N worker processes (1 to CPU count)
 echo   multibuilding --cores N                     Limit to N CPU cores
-echo   multibuilding --thermal-workers N           N thermal workers per building (1-4)
-echo   multibuilding --thermal-strategy parallel   Parallel thermal calculations
 echo   multibuilding --sequential                  Force sequential (no parallelism)
 echo   multibuilding --validate-system             Show system capabilities and valid ranges
 echo   multibuilding --quiet                       Reduce logging verbosity
-echo   Note: invalid --workers / --thermal-workers values are reported as errors
-echo   Example: setup.bat multibuilding --test parallel --workers 8 --thermal-workers 2
+echo   Note: invalid --workers values are reported as errors
+echo   Example: setup.bat multibuilding --test parallel --workers 8
 echo.
 echo Docker Workflows:
 echo   docker-build     Build the Docker image

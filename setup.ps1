@@ -67,23 +67,20 @@ function Show-Help {
     Write-Host "  api --port 8080  Start on a custom port"
     Write-Host ""
     Write-Host "Multi-Building:" -ForegroundColor Green
-    Write-Host "  multibuilding                               Run complete demo (auto-optimised)"
+    Write-Host "  multibuilding                               Run parallel processing (default)"
     Write-Host "  multibuilding --test parallel               Parallel processing only"
     Write-Host "  multibuilding --test sequential             Sequential processing only"
     Write-Host "  multibuilding --test comparison             Parallel vs sequential comparison"
     Write-Host "  multibuilding --test benchmark              Comprehensive benchmark suite"
     Write-Host "  multibuilding --test optimize               Auto-find optimal configuration"
-    Write-Host "  multibuilding --test thermal                Test thermal calculation strategies"
     Write-Host "  multibuilding --buildings 20                Process 20 buildings"
     Write-Host "  multibuilding --workers N                   N worker processes (1 to CPU count)"
     Write-Host "  multibuilding --cores N                     Limit to N CPU cores"
-    Write-Host "  multibuilding --thermal-workers N           N thermal workers per building (1-4)"
-    Write-Host "  multibuilding --thermal-strategy parallel   Parallel thermal calculations"
     Write-Host "  multibuilding --sequential                  Force sequential (no parallelism)"
     Write-Host "  multibuilding --validate-system             Show system capabilities and valid ranges"
     Write-Host "  multibuilding --quiet                       Reduce logging verbosity"
-    Write-Host "  Note: invalid --workers / --thermal-workers values are reported as errors"
-    Write-Host "  Example: .\setup.ps1 multibuilding --test parallel --workers 8 --thermal-workers 2" -ForegroundColor DarkGray
+    Write-Host "  Note: invalid --workers values are reported as errors"
+    Write-Host "  Example: .\setup.ps1 multibuilding --test parallel --workers 8" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Docker Workflows:" -ForegroundColor Green
     Write-Host "  docker-build     Build the Docker image"

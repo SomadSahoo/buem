@@ -27,13 +27,15 @@ dist/
 *.tar
 *.gz
 *.egg-info/
+src/buem/_version.py
 .git/
 .idea/
 .vscode/
 .softwares/*
 
-# Ignoring results from the local run
+# Ignoring results, caches, and run artifacts
 src/buem/results/*
+!src/buem/results/standard_plots.py
 
 # Documentation builds and caches
 docs/build/

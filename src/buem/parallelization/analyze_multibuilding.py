@@ -26,22 +26,15 @@ from typing import List, Dict, Any
 import json
 import threading
 
-# Add project root to path (this file lives in src/buem/parallelization/)
-project_root = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(project_root / "src"))
-
 # Optimize environment
 os.environ['OMP_NUM_THREADS'] = '4'
-os.environ['MKL_NUM_THREADS'] = '4' 
+os.environ['MKL_NUM_THREADS'] = '4'
 
-try:
-    from buem.main import run_model, cfg
-    from buem.parallelization.parallel_run import ParallelBuildingProcessor
-    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
-    import pandas as pd
-except ImportError as e:
-    print(f"❌ Error importing BUEM modules: {e}")
-    sys.exit(1)
+import pandas as pd
+
+from buem.main import run_model, cfg
+from buem.parallelization.parallel_run import ParallelBuildingProcessor
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 
 class PerformanceMonitor:
     """Monitor system performance during building processing."""
@@ -90,13 +83,12 @@ class PerformanceMonitor:
 
 def analyze_single_building_performance():
     """Analyze single building performance as baseline."""
-    print("🏢 SINGLE BUILDING BASELINE ANALYSIS")
+    print("SINGLE BUILDING BASELINE ANALYSIS")
     print("=" * 50)
     
     monitor = PerformanceMonitor()
     
-    # Test with sequential thermal
-    print("Testing sequential thermal processing...")
+    print("Running single-pass LP solver...")
     monitor.start_monitoring()
     start_time = time.time()
     
@@ -104,60 +96,25 @@ def analyze_single_building_performance():
         result = run_model(
             cfg,
             plot=False,
-            use_milp=False,
-            parallel_thermal=False,
-            use_chunked_processing=False
+            use_milp=False
         )
-        sequential_time = time.time() - start_time
-        sequential_stats = monitor.stop_monitoring()
-        print(f"  ✅ Sequential: {sequential_time:.2f}s")
+        elapsed_time = time.time() - start_time
+        stats = monitor.stop_monitoring()
+        print(f"  Done: {elapsed_time:.2f}s")
     except Exception as e:
-        sequential_time = float('inf')
-        sequential_stats = {}
-        print(f"  ❌ Sequential failed: {e}")
+        elapsed_time = float('inf')
+        stats = {}
+        print(f"  Failed: {e}")
     
-    # Test with parallel thermal
-    print("Testing parallel thermal processing...")
-    monitor = PerformanceMonitor()
-    monitor.start_monitoring()
-    start_time = time.time()
-    
-    try:
-        result = run_model(
-            cfg,
-            plot=False,
-            use_milp=False,
-            parallel_thermal=True,
-            use_chunked_processing=False
-        )
-        parallel_time = time.time() - start_time
-        parallel_stats = monitor.stop_monitoring()
-        print(f"  ✅ Parallel: {parallel_time:.2f}s")
-    except Exception as e:
-        parallel_time = float('inf')
-        parallel_stats = {}
-        print(f"  ❌ Parallel failed: {e}")
-    
-    # Calculate speedup
-    if sequential_time < float('inf') and parallel_time < float('inf'):
-        speedup = sequential_time / parallel_time
-        print(f"🚀 Thermal parallelization speedup: {speedup:.2f}x")
-    
-    print("\\n📊 Resource Usage:")
-    if sequential_stats:
-        print(f"  Sequential - CPU: {sequential_stats.get('avg_cpu_percent', 0):.1f}%, "
-              f"RAM: {sequential_stats.get('avg_memory_mb', 0):.0f}MB, "
-              f"Threads: {sequential_stats.get('max_threads', 0)}")
-    if parallel_stats:
-        print(f"  Parallel   - CPU: {parallel_stats.get('avg_cpu_percent', 0):.1f}%, "
-              f"RAM: {parallel_stats.get('avg_memory_mb', 0):.0f}MB, "
-              f"Threads: {parallel_stats.get('max_threads', 0)}")
+    print("\\nResource Usage:")
+    if stats:
+        print(f"  CPU: {stats.get('avg_cpu_percent', 0):.1f}%, "
+              f"RAM: {stats.get('avg_memory_mb', 0):.0f}MB, "
+              f"Threads: {stats.get('max_threads', 0)}")
     
     return {
-        'sequential_time': sequential_time,
-        'parallel_time': parallel_time,
-        'sequential_stats': sequential_stats,
-        'parallel_stats': parallel_stats
+        'elapsed_time': elapsed_time,
+        'stats': stats
     }
 
 def test_worker_allocation_efficiency(building_count: int = 8, max_workers: int = 16):
@@ -197,9 +154,7 @@ def test_worker_allocation_efficiency(building_count: int = 8, max_workers: int 
         try:
             # Process buildings in parallel
             processor = ParallelBuildingProcessor(
-                workers=workers,
-                thermal_strategy='parallel',
-                thermal_workers=2
+                workers=workers
             )
             
             building_results = []
@@ -277,7 +232,7 @@ def analyze_multibuilding_bottlenecks():
         'memory_bound': 'Memory allocation and matrix assembly overhead',
         'cpu_bound': 'CPU computational limits reached',
         'synchronization': 'Thread synchronization and worker coordination',
-        'thermal_serial': 'Sequential thermal processing within each building',
+        'solver_overhead': 'LP solver (CLARABEL) setup and solve overhead per building',
         'shared_resources': 'Shared resources like weather data processing'
     }
     
@@ -286,12 +241,12 @@ def analyze_multibuilding_bottlenecks():
         print(f"  • {key}: {description}")
     
     recommendations = [
-        "Enable chunked processing for memory-intensive buildings",
-        "Optimize thermal_workers (2-4) vs main workers (8-16) ratio",
+        "Tune worker count to match physical cores for CPU-bound LP solving",
         "Use NVMe SSD for faster I/O with large result files",
-        "Consider memory mapping for weather data sharing",
+        "Consider memory mapping for weather data sharing across workers",
         "Profile individual building complexity vs processing time",
-        "Test with reduced result output (disable plotting, minimize JSON)"
+        "Test with reduced result output (disable plotting, minimize JSON)",
+        "Pre-load shared data (weather, schedules) before forking workers"
     ]
     
     print("\\n💡 OPTIMIZATION RECOMMENDATIONS:")
@@ -344,9 +299,8 @@ def main():
     
     if 'single_building' in all_results:
         single = all_results['single_building']
-        if single['sequential_time'] < float('inf') and single['parallel_time'] < float('inf'):
-            speedup = single['sequential_time'] / single['parallel_time']
-            print(f"Single building thermal speedup: {speedup:.2f}x")
+        if single['elapsed_time'] < float('inf'):
+            print(f"Single building baseline: {single['elapsed_time']:.2f}s")
     
     if worker_results:
         best_workers = max([k for k, v in worker_results.items() 
@@ -363,7 +317,9 @@ def main():
     
     # Save results
     timestamp = int(time.time())
-    results_file = f"performance_analysis_{timestamp}.json"
+    results_dir = Path(__file__).resolve().parent.parent / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    results_file = str(results_dir / f"performance_analysis_{timestamp}.json")
     
     # Convert results to JSON-serializable format
     json_results = {}

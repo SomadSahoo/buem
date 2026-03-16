@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """Test the schema_validator CLI (--help exits with code 0)."""
-import sys
 from pathlib import Path
-
-# Resolve project root (this file lives in tests/)
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root / "src"))
 
 
 def test_schema_cli():

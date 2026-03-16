@@ -218,6 +218,17 @@ class ModelBUEM(object):
         for comp_name, comp_data in comps.items():
             if not isinstance(comp_data, dict):
                 raise ValueError(f"components.{comp_name} must be an object")
+
+            # Ventilation is not a physical surface with U-values per element;
+            # its aggregated conductance is computed from infiltration rates below.
+            # Skip area/U validation for ventilation components.
+            if comp_name.lower() == "ventilation":
+                self.component_elements[comp_name] = []  # no surface elements
+                self.bU[comp_name] = None
+                # ensure a placeholder so other code won't KeyError; H_ve is set later
+                self.bH.setdefault(comp_name, {})
+                continue
+
             elems = comp_data.get("elements", [])
             if not isinstance(elems, list):
                 raise ValueError(f"components.{comp_name}.elements must be a list")
@@ -235,16 +246,6 @@ class ModelBUEM(object):
                     **{k: v for k, v in e.items() if k not in ("id", "area", "azimuth", "tilt")}
                 })
             self.component_elements[comp_name] = parsed
-
-            # Ventilation is not a physical surface with U-values per element;
-            # its aggregated conductance is computed from infiltration rates below.
-            # If a 'Ventilation' component is present, skip the element/U requirement.
-            if comp_name.lower() == "ventilation":
-                self.component_elements[comp_name] = []  # no surface elements
-                self.bU[comp_name] = None
-                # ensure a placeholder so other code won't KeyError; H_ve is set later
-                self.bH.setdefault(comp_name, {})
-                continue
 
             # Aggregated conductance: prefer component-level U, otherwise require per-element U
             b_trans = float(comp_data.get("b_transmission")) if "b_transmission" in comp_data else 1.0

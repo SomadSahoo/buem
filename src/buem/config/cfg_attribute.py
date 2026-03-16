@@ -16,6 +16,7 @@ from .attribute_types import AttributeCategory, AttrType, AttributeSpec
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "weather"))
 WEATHER_DIR = os.environ.get("BUEM_WEATHER_DIR", DEFAULT_DATA_DIR)
 WEATHER_CSV = os.path.join(WEATHER_DIR, "COSMO_Year__ix_390_650.csv")
+WEATHER_CACHE = os.path.join(WEATHER_DIR, "COSMO_Year__ix_390_650_processed.feather")
 
 if not os.path.exists(WEATHER_CSV):
     raise FileNotFoundError(
@@ -24,14 +25,28 @@ if not os.path.exists(WEATHER_CSV):
         "COSMO_Year__ix_390_650.csv (e.g. mount ./data/weather and set env var accordingly)."
     )
 
-loader = CsvWeatherData(WEATHER_CSV)  # Loenen (52.07 N, 5.07 E) weather data
-loader.extract_weather_columns()
+# Try loading the already-processed feather cache (includes DISC-reconstructed DNI/DHI).
+# This avoids the ~2-3s pvlib DISC computation on every module import (critical for
+# multiprocessing workers that each re-import this module).
+if os.path.exists(WEATHER_CACHE):
+    df_weather = pd.read_feather(WEATHER_CACHE)
+    df_weather.set_index(df_weather.columns[0], inplace=True)
+    df_weather.index = pd.to_datetime(df_weather.index)
+else:
+    loader = CsvWeatherData(WEATHER_CSV)  # Loenen (52.07 N, 5.07 E) weather data
+    loader.extract_weather_columns()
 
-# Reconstruct DNI and DHI from GHI using pvlib DISC decomposition.
-# COSMO-REA6 stores DNI = (GHI-DHI)/cos(zenith), which diverges near the horizon
-# (observed max: 4951 W/m2, physically impossible).  DISC gives bounded 0..~1000 W/m2.
-df_weather = loader.reconstruct_dni_from_ghi(latitude=52.07, longitude=5.07)
-df_weather.index = df_weather.index.tz_convert(None)
+    # Reconstruct DNI and DHI from GHI using pvlib DISC decomposition.
+    # COSMO-REA6 stores DNI = (GHI-DHI)/cos(zenith), which diverges near the horizon
+    # (observed max: 4951 W/m2, physically impossible).  DISC gives bounded 0..~1000 W/m2.
+    df_weather = loader.reconstruct_dni_from_ghi(latitude=52.07, longitude=5.07)
+    df_weather.index = df_weather.index.tz_convert(None)
+
+    # Save processed weather to feather cache for fast reloading by worker processes
+    try:
+        df_weather.reset_index().to_feather(WEATHER_CACHE)
+    except Exception:
+        pass  # Non-critical: caching failure should not block model execution
 
 main_index = df_weather.index
 n_hours = len(main_index)
@@ -165,7 +180,7 @@ ATTRIBUTE_SPECS: Dict[str, AttributeSpec] = {
     "control": AttributeSpec("control", AttributeCategory.BOOLEAN, AttrType.BOOL, False),
     "num_persons": AttributeSpec("num_persons", AttributeCategory.FIXED, AttrType.INT, 4, doc="Default persons for electricity profile generation"),
     "year": AttributeSpec("year", AttributeCategory.FIXED, AttrType.INT, 2018, doc="Default year for profile generation"),
-    "seed": AttributeSpec("seed", AttributeCategory.FIXED, AttrType.INT, None, doc="Optional RNG seed for reproducible electricity profiles"),
+    "seed": AttributeSpec("seed", AttributeCategory.FIXED, AttrType.INT, 42, doc="RNG seed for reproducible electricity profiles (default: 42)"),
     "use_provided_elecLoad": AttributeSpec("use_provided_elecLoad", AttributeCategory.BOOLEAN, AttrType.BOOL, False, doc="If true, keep provided elecLoad even when force=True"),
 }
 

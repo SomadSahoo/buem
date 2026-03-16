@@ -1,6 +1,6 @@
 package:
   name: buem
-  version: "0.1.2"
+  version: {{ environ.get('GIT_DESCRIBE_TAG', '0.0.0') | replace('v', '') }}
 
 source:
   path: ..
@@ -12,30 +12,31 @@ build:
 
 requirements:
   host:
-    - python >=3.11
+    - python >=3.13
     - pip
   run:
-    - python >=3.11
-    - matplotlib
-    - numpy
-    - pandas
-    - pvlib
-    - scipy
-    - sympy
-    - openpyxl
+    - python >=3.13
+    - coinor-cbc  # [linux]
     - cvxpy
     - flask
-    - python-dotenv
-    - gunicorn
-    - pulp
-    - coinor-cbc # [linux] # native solver only required for Linux containers 
-    - gunicorn   # [linux] # server only for container/production
-    - pip
+    - gunicorn    # [linux]
+    - joblib
+    - jsonschema
     - marshmallow >=4.0.0
     - marshmallow-dataclass >=8.0.0
-    # Multiprocessing and performance dependencies
+    - matplotlib
+    - numba
+    - numpy
+    - openpyxl
+    - pandas
+    - pip
     - psutil
-    - joblib
+    - pulp
+    - pvlib
+    - pyarrow
+    - python-dotenv
+    - scipy
+    - sympy
 
 about:
   summary: "Building thermal simulation module (ISO 52016-1 5R1C)"

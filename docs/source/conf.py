@@ -12,7 +12,7 @@
 #
 import os
 import sys
-import tomllib
+from importlib.metadata import version as pkg_version, PackageNotFoundError
 from pathlib import Path
 
 # Add the project source directory to Python path for autodoc
@@ -23,15 +23,11 @@ src_path = project_root / 'src'
 if src_path.exists():
     sys.path.insert(0, str(src_path))
 
-# Import version from pyproject.toml
+# Import version from package metadata (populated by setuptools-scm)
 try:
-    pyproject_path = project_root / 'pyproject.toml'
-    with open(pyproject_path, 'rb') as f:
-        pyproject = tomllib.load(f)
-        project_version = pyproject['project']['version']
-except (FileNotFoundError, KeyError):
-    # Fallback version if pyproject.toml is not found or malformed
-    project_version = '0.1.2'
+    project_version = pkg_version('buem')
+except PackageNotFoundError:
+    project_version = '0.0.0'
 
 import sphinx_rtd_theme
 

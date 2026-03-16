@@ -21,22 +21,14 @@ from datetime import datetime
 from typing import List, Dict, Any
 import logging
 
-# Setup path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-try:
-    from buem.integration.scripts.geojson_validator import (
-        validate_geojson_request, 
-        create_validation_report,
-        ValidationLevel,
-        GeoJsonValidator
-    )
-    from buem.integration.scripts.debug_utils import BuemDebugger
-    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
-except ImportError as e:
-    print(f"Import error: {e}")
-    print("Make sure you're running from the correct directory and have all dependencies installed")
-    sys.exit(1)
+from buem.integration.scripts.geojson_validator import (
+    validate_geojson_request, 
+    create_validation_report,
+    ValidationLevel,
+    GeoJsonValidator
+)
+from buem.integration.scripts.debug_utils import BuemDebugger
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 
 
 class GeoJsonTestSuite:

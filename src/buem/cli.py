@@ -64,10 +64,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run the BUEM multi-building processing pipeline.\n"
             "All numeric parameters are validated against your system's CPU and memory.\n\n"
             "Examples:\n"
-            "  buem multibuilding                              # auto-optimised complete demo\n"
+            "  buem multibuilding                              # parallel processing (default)\n"
             "  buem multibuilding --test parallel              # parallel mode only\n"
             "  buem multibuilding --test parallel --workers 8  # 8 worker processes\n"
-            "  buem multibuilding --test parallel --cores 8 --workers 4 --thermal-workers 2\n"
+            "  buem multibuilding --test parallel --cores 8    # 8 cores\n"
             "  buem multibuilding --test optimize              # auto-find optimal config\n"
             "  buem multibuilding --validate-system            # show system capabilities"
         ),
@@ -75,15 +75,15 @@ def _build_parser() -> argparse.ArgumentParser:
     mb_p.add_argument(
         "--test",
         choices=["parallel", "sequential", "comparison", "benchmark",
-                 "complete", "optimize", "thermal"],
-        default="complete",
-        help="Test mode to run (default: complete demo)",
+                 "complete", "optimize"],
+        default="parallel",
+        help="Test mode to run (default: parallel only)",
     )
     mb_p.add_argument(
         "--buildings",
         type=int,
-        default=4,
-        help="Number of buildings to process (default: 4)",
+        default=None,
+        help="Number of buildings to process (default: all available)",
     )
     mb_p.add_argument(
         "--cores",
@@ -98,23 +98,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Worker processes for building parallelism (default: auto)",
     )
     mb_p.add_argument(
-        "--thermal-workers",
-        type=int,
-        default=None,
-        dest="thermal_workers",
-        help="Worker processes for thermal calculations per building, 1-4 (default: auto)",
-    )
-    mb_p.add_argument(
-        "--thermal-strategy",
-        choices=["sequential", "parallel"],
-        default="parallel",
-        dest="thermal_strategy",
-        help="Thermal calculation strategy (default: parallel)",
-    )
-    mb_p.add_argument(
         "--sequential",
         action="store_true",
-        help="Force sequential building processing (equivalent to --test sequential)",
+        help="Force sequential building processing (for debugging)",
     )
     mb_p.add_argument(
         "--validate-system",
@@ -211,16 +197,7 @@ def main() -> None:
                     f"({max_cores}); use a value between 1 and {max_cores}"
                 )
 
-        if args.thermal_workers is not None:
-            if args.thermal_workers < 1:
-                errors.append(f"--thermal-workers must be >= 1 (got {args.thermal_workers})")
-            elif args.thermal_workers > 4:
-                errors.append(
-                    f"--thermal-workers {args.thermal_workers} exceeds the recommended "
-                    f"maximum of 4 for thermal calculations; use a value between 1 and 4"
-                )
-
-        if args.buildings < 1:
+        if args.buildings is not None and args.buildings < 1:
             errors.append(f"--buildings must be >= 1 (got {args.buildings})")
 
         if errors:
@@ -240,16 +217,12 @@ def main() -> None:
         _test = "sequential" if args.sequential else args.test
         _argv += ["--test", _test]
 
-        if args.buildings:
+        if args.buildings is not None:
             _argv += ["--buildings", str(args.buildings)]
         if args.cores is not None:
             _argv += ["--cores", str(args.cores)]
         if args.workers is not None:
             _argv += ["--workers", str(args.workers)]
-        if args.thermal_workers is not None:
-            _argv += ["--thermal-workers", str(args.thermal_workers)]
-        if args.thermal_strategy:
-            _argv += ["--thermal-strategy", args.thermal_strategy]
         if args.validate_system:
             _argv += ["--validate-system"]
         if args.quiet:

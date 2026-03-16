@@ -131,7 +131,7 @@ For detailed API documentation, examples, and troubleshooting, see [docs/api_int
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.13+
 
 Other python-based modules
 --------------------------
@@ -143,6 +143,11 @@ Other python-based modules
 - sympy
 - openpyxl
 - cvxpy
+- numba
+- flask
+- pulp
+- psutil
+- joblib
 
 ## Notes
 

@@ -1,10 +1,7 @@
-import sys
 import os
 from pathlib import Path
 
-# Resolve project root (this file lives in tests/)
 project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root / "src"))
 
 print("Current working directory:", os.getcwd())
 print("Project root:", project_root)

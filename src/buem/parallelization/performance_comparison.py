@@ -47,20 +47,8 @@ import statistics
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Tuple
 from datetime import datetime, timezone
-import sys
-import os
-
-# Add the project root to Python path for imports
-project_root = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(project_root / "src"))
-
-try:
-    from buem.parallelization.parallel_run import ParallelBuildingProcessor
-    from buem.parallelization.sequence_run import SequentialBuildingProcessor
-except ImportError as e:
-    print(f"Error importing processing modules: {e}")
-    print("Make sure parallel_run.py and sequence_run.py are in the parallelization folder.")
-    sys.exit(1)
+from buem.parallelization.parallel_run import ParallelBuildingProcessor
+from buem.parallelization.sequence_run import SequentialBuildingProcessor
 
 # Configure logging
 logging.basicConfig(
@@ -292,7 +280,7 @@ class PerformanceComparator:
         """
         if building_files is None:
             # Find dummy building files
-            dummy_dir = Path(__file__).parent.parent / "integration/json_schema/versions/v2/dummy"
+            dummy_dir = Path(__file__).parent.parent / "data/buildings/dummy"
             building_files = list(dummy_dir.glob("*.json"))
             
             if not building_files:
@@ -658,7 +646,7 @@ def demo_performance_comparison():
     print("="*70)
     
     # Find dummy building files
-    dummy_dir = Path(__file__).parent.parent / "integration/json_schema/versions/v2/dummy"
+    dummy_dir = Path(__file__).parent.parent / "data/buildings/dummy"
     building_files = list(dummy_dir.glob("*.json"))
     
     if not building_files:

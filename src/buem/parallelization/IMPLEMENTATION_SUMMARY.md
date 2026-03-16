@@ -7,7 +7,7 @@ This implementation adds comprehensive multi-building processing capabilities to
 ## ✅ Completed Tasks
 
 ### 1. ✅ Created 5 Dummy Building Configurations
-**Location**: `src/buem/integration/json_schema/versions/v2/dummy/`
+**Location**: `src/buem/data/buildings/dummy/`
 
 - **building_01_small_residential.json**: 80 m² residential building with basic components
 - **building_02_medium_office.json**: 250 m² office building with enhanced thermal properties  
@@ -34,7 +34,7 @@ Each building has unique characteristics including:
 - Batch processing capabilities with chunking
 
 **Performance Optimizations**:
-- Process-level parallelism for CPU-intensive thermal modeling
+- Process-level parallelism distributing buildings across CPU cores
 - Efficient task distribution and load balancing
 - Memory optimization for large building datasets
 - Graceful handling of failed buildings without stopping processing
@@ -132,7 +132,7 @@ python run_multibuilding_demo.py --test benchmark
 
 1. **Input Validation**: JSON schema validation and BUEM domain validation
 2. **Attribute Extraction**: Building configuration parsing and normalization
-3. **Thermal Modeling**: Core BUEM simulation (heating/cooling load calculation)  
+3. **Thermal Modeling**: Core BUEM simulation (single-pass LP dead-band formulation via CLARABEL solver)  
 4. **Result Compilation**: Summary statistics and timeseries data generation
 5. **Output Formatting**: GeoJSON response formatting with thermal profiles
 

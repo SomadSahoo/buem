@@ -21,6 +21,7 @@ from buem.integration.scripts.geojson_validator import (
 )
 from buem.config.cfg_building import CfgBuilding
 from buem.main import run_model
+from buem.integration.scripts.result_cache import compute_cfg_hash, get_cached_result, store_result
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +193,21 @@ class GeoJsonProcessor:
         # Convert to model config
         cfg = CfgBuilding(merged_attrs).to_cfg_dict()
         
-        # Run thermal model with parallel thermal calculations and chunked processing for maximum performance
+        # Run thermal model (single-pass LP solver, CLARABEL)
+        # Check result cache first — identical configs produce identical outputs.
         use_milp = bool(buem.get("use_milp", False))
-        parallel_thermal = bool(buem.get("parallel_thermal", True))  # Default to True for better performance
-        use_chunked_processing = bool(buem.get("use_chunked_processing", True))  # Enable chunked processing for multi-core optimization
+        cache_key = compute_cfg_hash(cfg)
+        cached = get_cached_result(cache_key)
+        
         start = time.time()
-        res = run_model(cfg, plot=False, use_milp=use_milp, parallel_thermal=parallel_thermal, use_chunked_processing=use_chunked_processing)
-        elapsed = time.time() - start
+        if cached is not None:
+            res = cached
+            elapsed = time.time() - start
+            logger.info(f"Cache hit for feature {building_id} (key={cache_key[:12]}…)")
+        else:
+            res = run_model(cfg, plot=False, use_milp=use_milp)
+            elapsed = time.time() - start
+            store_result(cache_key, res)
         
         # Extract results with validation
         times = res.get("times", [])
@@ -225,9 +234,7 @@ class GeoJsonProcessor:
         # Add model metadata
         profile["model_metadata"] = {
             "model_version": "BUEM-v2.0",
-            "solver_used": "MILP" if use_milp else "Parameterization",
-            "parallel_thermal": parallel_thermal,
-            "use_chunked_processing": use_chunked_processing,
+            "solver_used": "MILP" if use_milp else "LP (CLARABEL)",
             "processing_time_s": round(elapsed, 3),
             "weather_year": int(getattr(cfg.get("weather", pd.DataFrame()).index, "year", [2018])[0]) if hasattr(cfg.get("weather", pd.DataFrame()).index, "year") else 2018,
             "validation_warnings": [w.message for w in validation_result.get_warnings()]

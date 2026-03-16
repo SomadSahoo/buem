@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Integration smoke-test: run the thermal model and check energy output."""
-import sys
 import os
 from pathlib import Path
 
-# Resolve project root (this file lives in tests/)
 project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root / "src"))
 os.environ.setdefault("BUEM_WEATHER_DIR", str(project_root / "src" / "buem" / "data"))
 
 from buem.main import run_model

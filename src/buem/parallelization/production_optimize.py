@@ -33,24 +33,17 @@ from typing import List, Dict, Any, Tuple
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import math
 
-# Add project root to path (this file lives in src/buem/parallelization/)
-project_root = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(project_root / "src"))
-
-# Optimize environment for Intel Core Ultra 7 165H (16 cores + 22 threads)
+# Optimize environment
 os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['MKL_NUM_THREADS'] = '4'
 os.environ['NUMEXPR_MAX_THREADS'] = '8'
 
-try:
-    from buem.main import run_model, cfg
-    from buem.parallelization.parallel_run import ParallelBuildingProcessor
-    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
-    import pandas as pd
-    import numpy as np
-except ImportError as e:
-    print(f"❌ Error importing BUEM modules: {e}")
-    sys.exit(1)
+import pandas as pd
+import numpy as np
+
+from buem.main import run_model, cfg
+from buem.parallelization.parallel_run import ParallelBuildingProcessor
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
 
 class OptimizedPerformanceAnalyzer:
     """Advanced performance analyzer with Intel Core Ultra 7 165H optimizations."""
@@ -71,41 +64,30 @@ class OptimizedPerformanceAnalyzer:
         print("🚀" * 60)
 
 class IntelligentWorkerAllocator:
-    """Smart worker allocation for Intel Core Ultra 7 165H architecture."""
+    """Smart worker allocation based on system hardware."""
     
     @staticmethod
     def calculate_optimal_workers(building_count: int, cpu_cores: int = 22) -> Dict[str, int]:
         """Calculate optimal worker allocation based on building count and hardware."""
         
-        # Intel Core Ultra 7 165H: 16 P-cores + 6 E-cores = 22 logical
         # Reserve 2 threads for system
         available_threads = cpu_cores - 2
         
         if building_count <= 4:
-            # Small portfolio: Focus on single-building optimization
             return {
                 'main_workers': min(building_count, 4),
-                'thermal_workers': 4,
-                'use_chunked': False,
                 'strategy': 'intensive_single'
             }
         elif building_count <= 12:
-            # Medium portfolio: Balanced approach
             main_workers = min(building_count, 8)
-            thermal_workers = max(2, available_threads // main_workers)
             return {
                 'main_workers': main_workers,
-                'thermal_workers': min(thermal_workers, 4),
-                'use_chunked': building_count > 8,
                 'strategy': 'balanced'
             }
         else:
-            # Large portfolio: Maximum throughput
             main_workers = min(16, available_threads // 2)
             return {
                 'main_workers': main_workers,
-                'thermal_workers': 2,
-                'use_chunked': True,
                 'strategy': 'high_throughput'
             }
 
@@ -230,62 +212,46 @@ def benchmark_single_building_performance() -> Dict[str, Any]:
     print("\\n🏢 SINGLE BUILDING BASELINE BENCHMARK")
     print("=" * 50)
     
-    configs_to_test = [
-        {'parallel_thermal': False, 'use_chunked_processing': False, 'name': 'sequential'},
-        {'parallel_thermal': True, 'use_chunked_processing': False, 'name': 'parallel_thermal'},
-        {'parallel_thermal': True, 'use_chunked_processing': True, 'name': 'parallel+chunked'}
-    ]
+    print("  Running single-pass LP solver benchmark...")
     
-    results = {}
+    start_time = time.time()
+    start_memory = psutil.virtual_memory().used / (1024**3)
     
-    for config_test in configs_to_test:
-        print(f"  Testing {config_test['name']}...")
+    try:
+        result = run_model(
+            cfg,
+            plot=False,
+            use_milp=False
+        )
         
-        start_time = time.time()
-        start_memory = psutil.virtual_memory().used / (1024**3)
+        elapsed = time.time() - start_time
+        memory_used = (psutil.virtual_memory().used / (1024**3)) - start_memory
         
-        try:
-            result = run_model(
-                cfg,
-                plot=False,
-                use_milp=False,
-                parallel_thermal=config_test['parallel_thermal'],
-                use_chunked_processing=config_test['use_chunked_processing']
-            )
-            
-            elapsed = time.time() - start_time
-            memory_used = (psutil.virtual_memory().used / (1024**3)) - start_memory
-            
-            # Extract key metrics
-            total_heating = result['heating'].sum() if 'heating' in result else 0
-            total_cooling = result['cooling'].sum() if 'cooling' in result else 0
-            
-            results[config_test['name']] = {
+        # Extract key metrics
+        total_heating = result['heating'].sum() if 'heating' in result else 0
+        total_cooling = result['cooling'].sum() if 'cooling' in result else 0
+        
+        results = {
+            'lp_solver': {
                 'time': elapsed,
                 'memory_peak_gb': memory_used,
                 'heating_total': total_heating,
                 'cooling_total': total_cooling,
                 'success': True
             }
-            
-            print(f"    ✅ {elapsed:.2f}s, {memory_used:.2f}GB peak")
-            
-        except Exception as e:
-            results[config_test['name']] = {
+        }
+        
+        print(f"    Done: {elapsed:.2f}s, {memory_used:.2f}GB peak")
+        
+    except Exception as e:
+        results = {
+            'lp_solver': {
                 'time': float('inf'),
                 'error': str(e),
                 'success': False
             }
-            print(f"    ❌ Failed: {e}")
-    
-    # Calculate improvements
-    if results['sequential']['success'] and results['parallel_thermal']['success']:
-        thermal_speedup = results['sequential']['time'] / results['parallel_thermal']['time']
-        print(f"\\n🚀 Thermal parallelization: {thermal_speedup:.2f}x speedup")
-        
-        if results['parallel+chunked']['success']:
-            chunked_speedup = results['sequential']['time'] / results['parallel+chunked']['time']
-            print(f"🚀 Parallel+Chunked: {chunked_speedup:.2f}x speedup")
+        }
+        print(f"    Failed: {e}")
     
     return results
 
@@ -310,18 +276,16 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
     allocator = IntelligentWorkerAllocator()
     optimal_config = allocator.calculate_optimal_workers(building_count)
     
-    print(f"\\n🎯 Optimal Configuration for {building_count} buildings:")
+    print(f"\\nOptimal Configuration for {building_count} buildings:")
     print(f"   Strategy: {optimal_config['strategy']}")
     print(f"   Main workers: {optimal_config['main_workers']}")
-    print(f"   Thermal workers: {optimal_config['thermal_workers']}")
-    print(f"   Chunked processing: {optimal_config['use_chunked']}")
     
     # Test different worker configurations
     worker_configs = [
-        {'workers': 1, 'thermal_workers': 2, 'name': 'single_worker'},
-        {'workers': optimal_config['main_workers'] // 2, 'thermal_workers': optimal_config['thermal_workers'], 'name': 'half_optimal'},
-        {'workers': optimal_config['main_workers'], 'thermal_workers': optimal_config['thermal_workers'], 'name': 'optimal'},
-        {'workers': min(16, optimal_config['main_workers'] * 2), 'thermal_workers': 2, 'name': 'max_workers'}
+        {'workers': 1, 'name': 'single_worker'},
+        {'workers': max(1, optimal_config['main_workers'] // 2), 'name': 'half_optimal'},
+        {'workers': optimal_config['main_workers'], 'name': 'optimal'},
+        {'workers': min(16, optimal_config['main_workers'] * 2), 'name': 'max_workers'}
     ]
     
     results = {}
@@ -335,9 +299,7 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
         try:
             # Process buildings using optimized configuration
             processor = ParallelBuildingProcessor(
-                workers=worker_config['workers'],
-                thermal_strategy='parallel',
-                thermal_workers=worker_config['thermal_workers']
+                workers=worker_config['workers']
             )
             
             processed_buildings = []
@@ -348,13 +310,9 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
                     with open(geojson_file, 'r') as f:
                         building_data = json.load(f)
                     
-                    # Use optimized processing
+                    # Use GeoJsonProcessor for processing
                     geo_processor = GeoJsonProcessor(building_data)
-                    
-                    # Apply optimal chunked processing setting
-                    result = geo_processor.run_model(
-                        use_chunked_processing=optimal_config['use_chunked']
-                    )
+                    result = geo_processor.process()
                     
                     processed_buildings.append(result)
                     successful_count += 1
@@ -363,7 +321,7 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
                         print(f"    Processed {i + 1}/{building_count} buildings...")
                         
                 except Exception as e:
-                    print(f"    ⚠️  Building {i} failed: {e}")
+                    print(f"    Building {i} failed: {e}")
                     continue
             
             elapsed = time.time() - start_time
@@ -381,7 +339,7 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
                 'success': True
             }
             
-            print(f"    ✅ {successful_count}/{building_count} buildings in {elapsed:.2f}s")
+            print(f"    {successful_count}/{building_count} buildings in {elapsed:.2f}s")
             print(f"       Rate: {buildings_per_second:.2f} buildings/sec")
             print(f"       Memory: {memory_used:.2f}GB peak")
             
@@ -391,7 +349,7 @@ def test_multibuilding_optimization(building_count: int = 10, max_workers: int =
                 'error': str(e),
                 'success': False
             }
-            print(f"    ❌ Configuration failed: {e}")
+            print(f"    Configuration failed: {e}")
     
     # Clean up test files
     print("\\n🧹 Cleaning up test files...")
@@ -436,8 +394,7 @@ def estimate_large_portfolio_performance(results: Dict[str, Any], target_buildin
             print("   💾 Enable chunked processing to reduce memory footprint")
             print("   🗂️  Consider result streaming to minimize memory usage")
         
-        print(f"   🔧 Recommended worker config: {results[best_config]['worker_config']['workers']} main workers, "
-              f"{results[best_config]['worker_config']['thermal_workers']} thermal workers")
+        print(f"   Recommended worker config: {results[best_config]['worker_config']['workers']} workers")
     else:
         print("❌ No successful configurations found for estimation")
 
@@ -484,8 +441,8 @@ def main():
     
     if 'baseline' in all_results:
         baseline = all_results['baseline']
-        if baseline.get('parallel_thermal', {}).get('success'):
-            print(f"Single building optimized: {baseline['parallel_thermal']['time']:.1f}s")
+        if baseline.get('lp_solver', {}).get('success'):
+            print(f"Single building baseline: {baseline['lp_solver']['time']:.1f}s")
     
     if multibuilding_results:
         best_multi = max([r for r in multibuilding_results.values() if r.get('success')],
@@ -496,7 +453,9 @@ def main():
     
     # Save comprehensive results
     timestamp = int(time.time())
-    results_file = f"production_optimization_{timestamp}.json"
+    results_dir = Path(__file__).resolve().parent.parent / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    results_file = str(results_dir / f"production_optimization_{timestamp}.json")
     
     # Make results JSON serializable
     json_results = {}

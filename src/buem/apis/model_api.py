@@ -41,10 +41,9 @@ def run_building_model():
         if issues:
             return jsonify({"status": "error", "error": "validation_failed", "issues": issues}), 400
 
-        # call centralized runner (allow caller to request MILP and parallel thermal)
+        # call centralized runner (allow caller to request MILP)
         use_milp = bool(payload.get("use_milp", False))
-        parallel_thermal = bool(payload.get("parallel_thermal", True))  # Default to True for performance
-        res = run_model(cfg, plot=False, use_milp=use_milp, parallel_thermal=parallel_thermal)
+        res = run_model(cfg, plot=False, use_milp=use_milp)
         times = res["times"]
         heating = res["heating"]
         cooling = res["cooling"]
@@ -148,8 +147,7 @@ def process_payload():
             return jsonify({"status": "error", "error": "validation_failed", "issues": issues}), 400
 
         use_milp = bool(payload.get("use_milp", False))
-        parallel_thermal = bool(payload.get("parallel_thermal", True))  # Default to True for performance  
-        res = run_model(cfg, plot=False, use_milp=use_milp, parallel_thermal=parallel_thermal)
+        res = run_model(cfg, plot=False, use_milp=use_milp)
         times = res["times"]
         heating = res["heating"]
         cooling = res["cooling"]

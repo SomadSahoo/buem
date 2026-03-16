@@ -3,20 +3,25 @@ channels:
   - conda-forge
   - default
 dependencies:
-  - python=3.11
-  - matplotlib
-  - numpy
-  - pandas
-  - pvlib
-  - scipy
-  - sympy
-  - openpyxl
+  - python=3.13
+  - coincbc
   - cvxpy
   - flask
-  - python-dotenv
+  - gunicorn
+  - joblib
+  - jsonschema
+  - matplotlib
+  - numba
+  - numpy
+  - openpyxl
+  - pandas
+  - psutil
   - pulp
-  - gunicorn    # required only inside container
-  - coincbc     # if you want conda solver inside container; apt-get coinor-cbc already installed too
+  - pvlib
+  - pyarrow
+  - python-dotenv
+  - scipy
+  - sympy
   - pip
   - pip:
     - marshmallow>=4.0.0

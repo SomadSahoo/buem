@@ -45,22 +45,10 @@ import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any, Union
 from datetime import datetime, timezone
-import sys
-import os
-
-# Add the project root to Python path for imports
-project_root = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(project_root / "src"))
-
-try:
-    from buem.integration.scripts.geojson_processor import GeoJsonProcessor
-    from buem.integration import validate_request_file
-    from buem.main import run_model
-    from buem.config.cfg_building import CfgBuilding
-except ImportError as e:
-    print(f"Error importing BUEM modules: {e}")
-    print("Make sure BUEM is properly installed and the path is correct.")
-    sys.exit(1)
+from buem.integration.scripts.geojson_processor import GeoJsonProcessor
+from buem.integration import validate_request_file
+from buem.main import run_model
+from buem.config.cfg_building import CfgBuilding
 
 # Configure logging
 logging.basicConfig(
@@ -418,7 +406,10 @@ class SequentialBuildingProcessor:
         
         # Save results if requested
         if save_results:
-            results_file = results_file or f"sequential_processing_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            if not results_file:
+                results_dir = Path(__file__).resolve().parent.parent / "results"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                results_file = str(results_dir / f"sequential_processing_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(results_file, 'w') as f:
                 json.dump(results, f, indent=2, default=str)
             logger.info(f"Results saved to: {results_file}")
@@ -449,7 +440,7 @@ def demo_sequential_processing():
     the previously created dummy building configurations.
     """
     # Find dummy building files
-    dummy_dir = Path(__file__).parent.parent / "integration/json_schema/versions/v2/dummy"
+    dummy_dir = Path(__file__).parent.parent / "data/buildings/dummy"
     building_files = list(dummy_dir.glob("*.json"))
     
     if not building_files:

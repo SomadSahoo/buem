@@ -256,10 +256,34 @@ class BuildingAttributesSchema(Schema):
 
 
 class BuemSchema(Schema):
-    """Schema for BUEM section."""
-    building_attributes = fields.Nested(BuildingAttributesSchema, required=True)
+    """Schema for BUEM section.
+
+    Accepts both v2 format (building_attributes) and v3 format
+    (building / envelope / thermal / solver).  The v3 sub-objects are
+    validated structurally by the JSON Schema layer, so marshmallow only
+    checks presence here.
+    """
+    # v2 format
+    building_attributes = fields.Nested(BuildingAttributesSchema, required=False, allow_none=True)
     child_components = fields.List(fields.Nested(ChildComponentSchema), required=False, allow_none=True)
     use_milp = fields.Bool(load_default=False)
+
+    # v3 format — structure validated by JSON Schema
+    building = fields.Dict(required=False, allow_none=True)
+    envelope = fields.Dict(required=False, allow_none=True)
+    thermal = fields.Dict(required=False, allow_none=True)
+    solver = fields.Dict(required=False, allow_none=True)
+
+    @validates_schema
+    def require_v2_or_v3(self, data, **kwargs):
+        """Ensure either v2 (building_attributes) or v3 (building+envelope) is present."""
+        has_v2 = data.get('building_attributes') is not None
+        has_v3 = data.get('building') is not None or data.get('envelope') is not None
+        if not has_v2 and not has_v3:
+            raise ValidationError(
+                "Provide either 'building_attributes' (v2) or 'building'+'envelope' (v3)",
+                field_name='buem',
+            )
 
 
 class PropertiesSchema(Schema):
@@ -374,29 +398,44 @@ class GeoJsonValidator:
             self._validate_single_feature(feature, f"features[{i}]", result)
     
     def _validate_single_feature(self, feature: Dict, path: str, result: ValidationResult):
-        """Validate a single feature."""
+        """Validate a single feature (supports both v2 and v3 layout)."""
         buem_data = feature.get('properties', {}).get('buem', {})
-        building_attrs = buem_data.get('building_attributes', {})
-        child_components = buem_data.get('child_components', [])
-        
-        # Check for component data
-        has_nested = 'components' in building_attrs and building_attrs['components']
-        has_child = child_components and len(child_components) > 0
-        
-        if not has_nested and not has_child:
-            result.add_issue(
-                ValidationLevel.ERROR,
-                "No building components found",
-                f"{path}.properties.buem",
-                suggestion="Provide either 'components' in building_attributes or 'child_components'"
-            )
-        elif has_nested and has_child:
-            result.add_issue(
-                ValidationLevel.WARNING,
-                "Both component formats provided, nested 'components' will take precedence",
-                f"{path}.properties.buem",
-                suggestion="Use only one component format for clarity"
-            )
+
+        # Detect schema version by key presence
+        is_v3 = 'building' in buem_data or 'envelope' in buem_data
+
+        if is_v3:
+            # v3: envelope.elements carries the component data
+            envelope = buem_data.get('envelope', {})
+            if not envelope.get('elements'):
+                result.add_issue(
+                    ValidationLevel.ERROR,
+                    "No envelope elements found",
+                    f"{path}.properties.buem.envelope",
+                    suggestion="Provide 'elements' list inside 'envelope'"
+                )
+        else:
+            # v2: building_attributes.components or child_components
+            building_attrs = buem_data.get('building_attributes', {})
+            child_components = buem_data.get('child_components', [])
+
+            has_nested = 'components' in building_attrs and building_attrs['components']
+            has_child = child_components and len(child_components) > 0
+
+            if not has_nested and not has_child:
+                result.add_issue(
+                    ValidationLevel.ERROR,
+                    "No building components found",
+                    f"{path}.properties.buem",
+                    suggestion="Provide either 'components' in building_attributes or 'child_components'"
+                )
+            elif has_nested and has_child:
+                result.add_issue(
+                    ValidationLevel.WARNING,
+                    "Both component formats provided, nested 'components' will take precedence",
+                    f"{path}.properties.buem",
+                    suggestion="Use only one component format for clarity"
+                )
     
     def _validate_time_consistency(self, features: List[Dict], result: ValidationResult):
         """Validate time range consistency."""
@@ -510,7 +549,7 @@ class GeoJsonValidator:
         self._flatten_errors(errors, result, "")
     
     def _flatten_errors(self, errors: Union[Dict, List, str], result: ValidationResult, path: str):
-        """Recursively flatten nested error messages."""
+        """Recursively flatten nested error messages with actionable suggestions."""
         if isinstance(errors, dict):
             for key, value in errors.items():
                 new_path = f"{path}.{key}" if path else key
@@ -521,15 +560,45 @@ class GeoJsonValidator:
                     ValidationLevel.ERROR,
                     str(error),
                     path,
-                    suggestion="Check value format and constraints"
+                    suggestion=self._suggest_fix(str(error), path)
                 )
         else:
             result.add_issue(
                 ValidationLevel.ERROR,
                 str(errors),
                 path,
-                suggestion="Check value format and constraints"
+                suggestion=self._suggest_fix(str(errors), path)
             )
+
+    @staticmethod
+    def _suggest_fix(error_msg: str, path: str) -> str:
+        """Return an actionable suggestion based on the error text and field path."""
+        msg = error_msg.lower()
+
+        if "missing data for required field" in msg:
+            field_name = path.rsplit('.', 1)[-1] if '.' in path else path
+            if field_name == 'building_attributes':
+                return ("v2 format expects 'building_attributes' inside buem. "
+                        "If using v3 format, provide 'building' and 'envelope' instead")
+            return f"Add the required '{field_name}' field"
+
+        if "unknown field" in msg:
+            field_name = path.rsplit('.', 1)[-1] if '.' in path else path
+            if field_name in ('building', 'envelope', 'thermal', 'solver'):
+                return ("These are v3 schema keys. Ensure the marshmallow domain "
+                        "validator and JSON Schema version both target v3")
+            return f"'{field_name}' is not recognised at this level — check spelling or nesting"
+
+        if "not a valid" in msg:
+            return f"Value at '{path}' has the wrong type — check the expected format"
+
+        if "must be" in msg or "between" in msg:
+            return f"Value at '{path}' is out of range — see the constraint in the error"
+
+        if "length" in msg or "empty" in msg:
+            return f"'{path}' must not be empty"
+
+        return f"Review the value at '{path}' — see error message above for details"
 
 
 def validate_geojson_request(payload: Dict[str, Any], strict_mode: bool = False) -> ValidationResult:
