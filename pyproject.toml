@@ -86,6 +86,7 @@ buem = [
 
 [tool.setuptools_scm]
 version_file = "src/buem/_version.py"
+fallback_version = "0.1.2"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

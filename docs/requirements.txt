@@ -1,14 +1,5 @@
-# Documentation dependencies for ReadTheDocs
-Sphinx==4.5.0
-sphinx-rtd-theme==1.0.0
-Jinja2<3.1
-sphinxcontrib-applehelp==1.0.4
-sphinxcontrib-devhelp==1.0.2
-sphinxcontrib-htmlhelp==2.0.1
-sphinxcontrib-qthelp==1.0.3
-sphinxcontrib-serializinghtml==1.1.5
-
-# Additional dependencies for autodoc
-numpy
-pandas
-flask
+# Documentation dependencies
+# These are used only if building docs outside of `pip install .[docs]`.
+# ReadTheDocs uses the [docs] extra from pyproject.toml instead.
+sphinx>=9.0.0
+sphinx-rtd-theme>=3.0.0

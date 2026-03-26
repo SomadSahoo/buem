@@ -4,30 +4,12 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-# -- Path setup --------------------------------------------------------------
-
-# If extensions (or modules to document with autodoc) are in another directory,
-# add these directories to sys.path here. If the directory is relative to the
-# documentation root, use os.path.abspath to make it absolute, like shown here.
-#
-import os
-import sys
-from importlib.metadata import version as pkg_version, PackageNotFoundError
-from pathlib import Path
-
-# Add the project source directory to Python path for autodoc
-# This is standard practice for Sphinx to enable module imports
-project_root = Path(__file__).parent.parent.parent.resolve()
-src_path = project_root / 'src'
-
-if src_path.exists():
-    sys.path.insert(0, str(src_path))
-
-# Import version from package metadata (populated by setuptools-scm)
+# -- Version setup -----------------------------------------------------------
+# Delegates to buem/__init__.py which handles all fallbacks.
 try:
-    project_version = pkg_version('buem')
-except PackageNotFoundError:
-    project_version = '0.0.0'
+    from buem import __version__ as project_version
+except Exception:
+    project_version = '0.1.2'  # last-resort fallback
 
 import sphinx_rtd_theme
 

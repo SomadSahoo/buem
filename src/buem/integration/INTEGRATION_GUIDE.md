@@ -289,10 +289,7 @@ print(f"Validation Summary: {passed}/{total} files passed")
 If you encounter import errors:
 
 ```python
-# Test basic imports
-import sys
-sys.path.insert(0, 'src')
-
+# Test basic imports (requires: pip install -e .)
 try:
     from buem.integration.schema_manager import SchemaVersionManager
     print("✅ Schema manager works")
