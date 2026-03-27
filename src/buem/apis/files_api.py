@@ -14,5 +14,12 @@ def download_file(filename):
         except Exception:
             current_app.logger.exception("Failed to create results dir")
             return jsonify({"error": "server_error"}), 500
-    # sanitize: prevent path traversal by only serving from RESULTS_DIR
-    return send_from_directory(RESULTS_DIR, filename, as_attachment=True)
+    # For .gz files, explicitly set mimetype to application/gzip so that
+    # Flask does NOT add a Content-Encoding: gzip header.  Without this,
+    # Python's mimetypes returns ('application/json', 'gzip') for .json.gz
+    # which causes Flask to set Content-Encoding: gzip — the browser then
+    # transparently decompresses the response, corrupting the download.
+    mimetype = "application/gzip" if filename.endswith(".gz") else None
+    return send_from_directory(
+        RESULTS_DIR, filename, as_attachment=True, mimetype=mimetype,
+    )

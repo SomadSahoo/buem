@@ -392,7 +392,7 @@ class GeoJsonProcessor:
     
     def _save_timeseries(self, times, heating, cooling, electricity) -> str:
         """
-        Save timeseries as gzipped JSON.
+        Save timeseries as gzip-compressed JSON.
         
         Returns
         -------
@@ -407,7 +407,7 @@ class GeoJsonProcessor:
         if isinstance(times, pd.DatetimeIndex):
             time_list = [t.isoformat() for t in times]
         else:
-            time_list = [t.isoformat() for t in times]       
+            time_list = [t.isoformat() for t in times]
 
         payload = {
             "index": time_list,
@@ -415,9 +415,9 @@ class GeoJsonProcessor:
             "cool": [float(x) for x in cooling.tolist()],
             "electricity": [float(x) for x in electricity.tolist()] if len(electricity) else [],
         }
-        
+
         with gzip.open(full_path, "wt", encoding="utf-8") as gz:
             json.dump(payload, gz, indent=None)
-        
+
         logger.info(f"Saved timeseries: {full_path}")
         return fname
