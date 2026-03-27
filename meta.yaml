@@ -20,6 +20,7 @@ requirements:
     - coinor-cbc  # [linux]
     - cvxpy
     - flask
+    - flask-swagger-ui
     - gunicorn    # [linux]
     - joblib
     - jsonschema

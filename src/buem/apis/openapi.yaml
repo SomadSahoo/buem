@@ -1,0 +1,1120 @@
+openapi: "3.1.0"
+info:
+  title: BuEM — Building Energy Model API
+  version: "3.0.0"
+  description: |
+    BuEM computes hourly heating and cooling demand for buildings using the
+    **ISO 13790 5R1C** thermal-network method combined with a
+    linear-programming solver.
+
+    The primary endpoint (`POST /api/process`) accepts a GeoJSON
+    **FeatureCollection** where each feature describes one building.
+    Results — including summary statistics and optional hourly time series —
+    are returned in the same GeoJSON structure with a `thermal_load_profile`
+    appended to each feature.
+
+    ### Data sources
+
+    Building attributes follow the **TABULA/IEE** classification system.
+    Source attribute definitions (3D-BAG, TABULA, City2TABULA) are
+    documented in `Attribute_requirement_collection.xlsx` shipped with the
+    package.
+
+    ### Schema versions
+
+    The request/response payloads follow **v3** of the BuEM JSON Schema
+    (`src/buem/integration/json_schema/versions/v3/`).  All measurable
+    quantities carry an explicit `unit` field; SI units are assumed when
+    `unit` is omitted.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: Somadutta Sahoo
+    email: s.sahoo@uu.nl
+
+servers:
+  - url: http://localhost:5000
+    description: Local development (Flask)
+  - url: http://localhost:8000
+    description: Local production (Gunicorn)
+
+tags:
+  - name: Simulation
+    description: Building thermal simulation endpoints
+  - name: Files
+    description: Result file download
+  - name: System
+    description: Health and diagnostics
+
+# ─────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────
+paths:
+
+  /api/process:
+    post:
+      operationId: processPayload
+      summary: Process GeoJSON or plain building config
+      description: |
+        Unified entry point that accepts either:
+
+        * A **GeoJSON** `Feature` or `FeatureCollection` containing
+          `properties.buem.building` — each feature is processed through the
+          thermal model and results are returned in GeoJSON format.
+        * A **plain JSON** building config (same payload accepted by
+          `/api/run`) — runs the model once and returns a summary.
+
+        Detection is automatic: if the payload contains
+        `"type": "Feature"` / `"FeatureCollection"` or a `"features"` key,
+        it is treated as GeoJSON.
+      tags: [Simulation]
+      parameters:
+        - $ref: "#/components/parameters/include_timeseries"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/GeoJsonRequest"
+                - $ref: "#/components/schemas/PlainBuildingConfig"
+            examples:
+              geojson_request:
+                summary: GeoJSON FeatureCollection (v3)
+                $ref: "#/components/examples/GeojsonRequest"
+              plain_config:
+                summary: Plain building config
+                $ref: "#/components/examples/PlainConfig"
+      responses:
+        "200":
+          description: Successful processing
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/GeoJsonResponse"
+                  - $ref: "#/components/schemas/RunResponse"
+              examples:
+                geojson_response:
+                  summary: GeoJSON response with thermal results
+                  $ref: "#/components/examples/GeojsonResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/run:
+    post:
+      operationId: runBuildingModel
+      summary: Run thermal model for a single building
+      description: |
+        Accepts a plain JSON building configuration (not GeoJSON) and runs
+        the ISO 13790 5R1C thermal model.  Returns heating/cooling summary
+        and optional hourly time series.
+      tags: [Simulation]
+      parameters:
+        - $ref: "#/components/parameters/include_timeseries"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlainBuildingConfig"
+            examples:
+              plain_config:
+                summary: Single building config
+                $ref: "#/components/examples/PlainConfig"
+      responses:
+        "200":
+          description: Model run completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/files/{filename}:
+    get:
+      operationId: downloadFile
+      summary: Download a result file
+      description: |
+        Retrieve a time-series result file previously saved by the model.
+        The path is returned in `thermal_load_profile.timeseries_file` when
+        `include_timeseries=true`.
+      tags: [Files]
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+          description: File name returned by a model run (e.g. `buem_ts_abc123.json.gz`)
+      responses:
+        "200":
+          description: File download
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: File not found
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns service status.
+      tags: [System]
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+              example:
+                status: ok
+
+# ─────────────────────────────────────────────────────────────────────
+# Components
+# ─────────────────────────────────────────────────────────────────────
+components:
+
+  # ── Parameters ────────────────────────────────────────────────────
+  parameters:
+    include_timeseries:
+      name: include_timeseries
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: |
+        When `true`, include full hourly arrays in the response and save a
+        compressed time-series file on the server.
+
+  # ── Reusable responses ───────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid or missing input
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            status: error
+            error: validation_failed
+            issues:
+              - "building.envelope.elements is required"
+    InternalError:
+      description: Server-side processing failure
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            status: error
+            error: "Model execution failed"
+
+  # ── Schemas ──────────────────────────────────────────────────────
+  schemas:
+
+    # ── Measurement quantity types ─────────────────────────────────
+    Measurement:
+      type: object
+      required: [value]
+      description: >
+        Base type for all measurable quantities.  SI unit is assumed when
+        `unit` is omitted.
+      properties:
+        value:
+          type: number
+        unit:
+          type: string
+
+    AreaQty:
+      description: "Area measurement (default: m²)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["m2", "ft2"]
+          default: "m2"
+
+    LengthQty:
+      description: "Length measurement (default: m)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["m", "ft"]
+          default: "m"
+
+    AngleQty:
+      description: "Angle measurement (default: deg)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+          maximum: 360
+        unit:
+          enum: ["deg", "rad"]
+          default: "deg"
+
+    UValueQty:
+      description: "Thermal transmittance (default: W/(m²K))"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["W/(m2K)", "BTU/(h.ft2.F)"]
+          default: "W/(m2K)"
+
+    AirChangeQty:
+      description: "Air change rate (1/h)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["1/h"]
+          default: "1/h"
+
+    HeatCapacityQty:
+      description: "Heat capacity per floor area (default: kJ/(m²K))"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["kJ/(m2K)", "BTU/(ft2.F)"]
+          default: "kJ/(m2K)"
+
+    TemperatureQty:
+      description: "Temperature (default: °C)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        unit:
+          enum: ["degC", "degF"]
+          default: "degC"
+
+    DimensionlessQty:
+      description: Dimensionless ratio (0–1)
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        unit:
+          const: "-"
+
+    EnergyQty:
+      description: "Energy (default: kWh)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["kWh", "MWh", "Wh"]
+          default: "kWh"
+
+    PowerQty:
+      description: "Power (default: kW)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        unit:
+          enum: ["kW", "W", "MW"]
+          default: "kW"
+
+    EnergyIntensityQty:
+      description: "Energy per floor area (default: kWh/m²)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["kWh/m2", "kWh/ft2"]
+          default: "kWh/m2"
+
+    DurationQty:
+      description: "Duration (default: s)"
+      allOf:
+        - $ref: "#/components/schemas/Measurement"
+      properties:
+        value:
+          minimum: 0
+        unit:
+          enum: ["s", "ms", "min"]
+          default: "s"
+
+    # ── GeoJSON Request ────────────────────────────────────────────
+    GeoJsonRequest:
+      type: object
+      required: [type, features]
+      description: |
+        GeoJSON FeatureCollection following BuEM schema **v3**.
+        Each feature represents one building.
+      properties:
+        type:
+          type: string
+          const: FeatureCollection
+        timeStamp:
+          type: string
+          format: date-time
+          description: Request timestamp
+        features:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Feature"
+
+    Feature:
+      type: object
+      required: [type, id, geometry, properties]
+      properties:
+        type:
+          type: string
+          const: Feature
+        id:
+          type: string
+          description: Unique building identifier
+        geometry:
+          $ref: "#/components/schemas/PointGeometry"
+        properties:
+          $ref: "#/components/schemas/FeatureProperties"
+
+    PointGeometry:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          const: Point
+        coordinates:
+          type: array
+          description: "[longitude, latitude, elevation?]"
+          items:
+            type: number
+          minItems: 2
+          maxItems: 3
+
+    FeatureProperties:
+      type: object
+      required: [start_time, end_time, buem]
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          description: Simulation start
+        end_time:
+          type: string
+          format: date-time
+          description: Simulation end
+        resolution:
+          type: string
+          default: "60"
+          description: Time-step value
+        resolution_unit:
+          type: string
+          default: minutes
+          description: Time-step unit
+        buem:
+          $ref: "#/components/schemas/BuemInput"
+
+    BuemInput:
+      type: object
+      required: [building]
+      description: >
+        BUEM model input — `building` holds the physical description;
+        `solver` holds execution flags.
+      properties:
+        building:
+          $ref: "#/components/schemas/Building"
+        solver:
+          $ref: "#/components/schemas/Solver"
+
+    # ── Building ───────────────────────────────────────────────────
+    Building:
+      type: object
+      required: [envelope]
+      description: >
+        Complete physical description.  Classification fields sit at this
+        level; geometry and per-element thermal properties live in
+        `envelope`; building-wide thermal parameters live in `thermal`.
+      properties:
+        A_ref:
+          allOf: [{$ref: "#/components/schemas/AreaQty"}]
+          description: Reference floor area
+        h_room:
+          allOf: [{$ref: "#/components/schemas/LengthQty"}]
+          description: Average room height
+        n_storeys:
+          type: integer
+          minimum: 1
+          description: Number of storeys
+        building_type:
+          type: string
+          description: >
+            Building type code — SFH (single-family house),
+            MFH (multi-family house), AB (apartment block),
+            TH (terraced house)
+        construction_period:
+          type: string
+          description: "Construction period range (e.g. 1965-1974)"
+        country:
+          type: string
+          description: ISO 3166-1 alpha-2 country code (e.g. NL, DE)
+        attic_condition:
+          type: string
+          enum: ["-", "N", "P", "C", "NI", "PI"]
+          description: >
+            Attic status — N not conditioned, P partially, C conditioned,
+            NI not insulated, PI partially insulated
+        cellar_condition:
+          type: string
+          enum: ["-", "N", "P", "C", "NI", "PI"]
+          description: Cellar status (same codes as attic)
+        neighbour_status:
+          type: string
+          enum: [B_Alone, B_N1, B_N2]
+          description: >
+            Detached (B_Alone), one shared wall (B_N1),
+            two shared walls (B_N2)
+        envelope:
+          $ref: "#/components/schemas/Envelope"
+        thermal:
+          $ref: "#/components/schemas/Thermal"
+
+    # ── Envelope ───────────────────────────────────────────────────
+    Envelope:
+      type: object
+      required: [elements]
+      description: >
+        All building surfaces.  Each element carries both geometry and
+        thermal properties in a single entry.
+      properties:
+        elements:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EnvelopeElement"
+
+    EnvelopeElement:
+      type: object
+      required: [id, type]
+      description: |
+        A single building surface.  For `ventilation` elements only
+        `air_changes` is required; all other types require `area`,
+        `azimuth`, and `tilt`.
+      properties:
+        id:
+          type: string
+          minLength: 1
+          description: Unique surface identifier
+        type:
+          type: string
+          enum: [wall, roof, floor, window, door, ventilation]
+        area:
+          allOf: [{$ref: "#/components/schemas/AreaQty"}]
+          description: Surface area
+        azimuth:
+          allOf: [{$ref: "#/components/schemas/AngleQty"}]
+          description: >
+            Orientation clockwise from North
+            (0=N, 90=E, 180=S, 270=W)
+        tilt:
+          allOf: [{$ref: "#/components/schemas/AngleQty"}]
+          description: >
+            Tilt from horizontal (0=flat roof, 90=vertical wall)
+        parent_id:
+          type: string
+          description: >
+            ID of the surface this element is embedded in.
+            Required for windows and doors.
+        U:
+          allOf: [{$ref: "#/components/schemas/UValueQty"}]
+          description: Thermal transmittance (U-value)
+        b_transmission:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: >
+            Transmission correction factor for elements adjacent to
+            unheated spaces (0–1, default 1.0)
+        g_gl:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: >
+            Solar heat gain coefficient (windows only, 0–1)
+        air_changes:
+          allOf: [{$ref: "#/components/schemas/AirChangeQty"}]
+          description: Air changes per hour (ventilation elements only)
+
+    # ── Thermal ────────────────────────────────────────────────────
+    Thermal:
+      type: object
+      description: >
+        Building-wide thermal parameters aligned with IEE TABULA.
+        All fields are optional — SI defaults apply when omitted.
+      properties:
+        n_air_infiltration:
+          allOf: [{$ref: "#/components/schemas/AirChangeQty"}]
+          description: "Uncontrolled air infiltration (default: 0.5 1/h)"
+        n_air_use:
+          allOf: [{$ref: "#/components/schemas/AirChangeQty"}]
+          description: "Ventilation air change rate during occupancy (default: 0.5 1/h)"
+        c_m:
+          allOf: [{$ref: "#/components/schemas/HeatCapacityQty"}]
+          description: "Internal thermal capacity per m² floor area (default: 165 kJ/(m²K))"
+        thermal_class:
+          type: string
+          enum: [light, medium, heavy]
+          default: medium
+          description: ISO 13790 thermal mass class — used to derive c_m when not provided
+        comfortT_lb:
+          allOf: [{$ref: "#/components/schemas/TemperatureQty"}]
+          description: "Heating setpoint (default: 21 °C)"
+        comfortT_ub:
+          allOf: [{$ref: "#/components/schemas/TemperatureQty"}]
+          description: "Cooling setpoint (default: 24 °C)"
+        design_T_min:
+          allOf: [{$ref: "#/components/schemas/TemperatureQty"}]
+          description: "Outdoor design temperature for peak heating (default: −12 °C)"
+        F_sh_hor:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: "Shading factor — horizontal surfaces (default: 0.80)"
+        F_sh_vert:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: "Shading factor — vertical surfaces (default: 0.75)"
+        F_f:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: "Window frame area fraction (default: 0.20)"
+        F_w:
+          allOf: [{$ref: "#/components/schemas/DimensionlessQty"}]
+          description: "Window non-perpendicularity correction (default: 1.0)"
+
+    # ── Solver ─────────────────────────────────────────────────────
+    Solver:
+      type: object
+      description: Execution settings for the thermal solver.
+      properties:
+        use_milp:
+          type: boolean
+          default: false
+          description: Use MILP solver (CVXPY + CBC) instead of default LP
+        parallel_thermal:
+          type: boolean
+          default: true
+          description: Run heating/cooling in parallel
+        use_chunked_processing:
+          type: boolean
+          default: true
+          description: Process 8760-hour series in memory-limited chunks
+
+    # ── Plain building config (for /api/run) ───────────────────────
+    PlainBuildingConfig:
+      type: object
+      description: >
+        Flat JSON building configuration accepted by `/api/run`.
+        Same attribute set converted internally to `CfgBuilding`.
+      properties:
+        include_timeseries:
+          type: boolean
+          default: false
+        use_milp:
+          type: boolean
+          default: false
+        forward_url:
+          type: string
+          format: uri
+          description: Optional URL to forward results to
+      additionalProperties: true
+
+    # ── GeoJSON Response ───────────────────────────────────────────
+    GeoJsonResponse:
+      type: object
+      required: [type, features]
+      description: >
+        GeoJSON FeatureCollection echoing the request with
+        `thermal_load_profile` appended to each feature.
+      properties:
+        type:
+          type: string
+          const: FeatureCollection
+        processed_at:
+          type: string
+          format: date-time
+        processing_elapsed_s:
+          type: number
+          description: Total wall-clock time (seconds)
+        metadata:
+          $ref: "#/components/schemas/CollectionMetadata"
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResponseFeature"
+
+    CollectionMetadata:
+      type: object
+      properties:
+        total_features:
+          type: integer
+        successful_features:
+          type: integer
+        failed_features:
+          type: integer
+        validation_warnings:
+          type: integer
+
+    ResponseFeature:
+      type: object
+      required: [type, id, geometry, properties]
+      properties:
+        type:
+          type: string
+          const: Feature
+        id:
+          type: string
+        geometry:
+          $ref: "#/components/schemas/PointGeometry"
+        properties:
+          $ref: "#/components/schemas/ResponseProperties"
+
+    ResponseProperties:
+      type: object
+      properties:
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        resolution:
+          type: string
+        resolution_unit:
+          type: string
+        buem:
+          $ref: "#/components/schemas/BuemOutput"
+
+    BuemOutput:
+      type: object
+      required: [building, thermal_load_profile]
+      description: >
+        Echoes the request `building` and `solver` nodes and appends
+        computed results.
+      properties:
+        building:
+          type: object
+          description: Echoed from request
+        solver:
+          type: object
+          description: Echoed from request
+        thermal_load_profile:
+          $ref: "#/components/schemas/ThermalLoadProfile"
+        model_metadata:
+          $ref: "#/components/schemas/ModelMetadata"
+
+    # ── Thermal load profile ───────────────────────────────────────
+    ThermalLoadProfile:
+      type: object
+      required: [start_time, end_time, resolution, resolution_unit, summary]
+      description: Computed thermal load results for one building.
+      properties:
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        resolution:
+          type: string
+        resolution_unit:
+          type: string
+        summary:
+          $ref: "#/components/schemas/LoadSummary"
+        timeseries:
+          $ref: "#/components/schemas/LoadTimeseries"
+        timeseries_file:
+          type: string
+          description: >
+            Download path for the gzip time-series file
+            (e.g. `/api/files/buem_ts_abc123.json.gz`)
+
+    LoadSummary:
+      type: object
+      required: [heating, cooling, electricity]
+      description: Aggregated statistics over the full simulation period.
+      properties:
+        heating:
+          $ref: "#/components/schemas/EnergySummary"
+        cooling:
+          $ref: "#/components/schemas/EnergySummary"
+        electricity:
+          $ref: "#/components/schemas/EnergySummary"
+        total_energy_demand:
+          allOf: [{$ref: "#/components/schemas/EnergyQty"}]
+          description: Total heating + cooling + electricity
+        peak_heating_load:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+        peak_cooling_load:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+        energy_intensity:
+          allOf: [{$ref: "#/components/schemas/EnergyIntensityQty"}]
+          description: Total demand per reference floor area
+
+    EnergySummary:
+      type: object
+      required: [total, max, min, mean]
+      description: Statistical summary for one energy carrier.
+      properties:
+        total:
+          allOf: [{$ref: "#/components/schemas/EnergyQty"}]
+          description: Total over the period
+        max:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+          description: Peak instantaneous power
+        min:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+          description: Minimum instantaneous power
+        mean:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+          description: Mean power
+        median:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+          description: Median power
+        std:
+          allOf: [{$ref: "#/components/schemas/PowerQty"}]
+          description: Standard deviation
+
+    LoadTimeseries:
+      type: object
+      required: [unit, timestamps, heating, cooling, electricity]
+      description: >
+        Hourly arrays — present only when `include_timeseries=true`.
+      properties:
+        unit:
+          type: string
+          enum: [kW, W, MW]
+          default: kW
+        timestamps:
+          type: array
+          items:
+            type: string
+            format: date-time
+        heating:
+          type: array
+          items:
+            type: number
+        cooling:
+          type: array
+          items:
+            type: number
+        electricity:
+          type: array
+          items:
+            type: number
+
+    ModelMetadata:
+      type: object
+      description: Diagnostic information about the model run.
+      properties:
+        model_version:
+          type: string
+          example: BUEM-v2.0
+        solver_used:
+          type: string
+          example: LP (CLARABEL)
+        processing_time:
+          allOf: [{$ref: "#/components/schemas/DurationQty"}]
+        weather_year:
+          type: integer
+          example: 2018
+        parallel_thermal:
+          type: boolean
+        use_chunked_processing:
+          type: boolean
+        validation_warnings:
+          type: array
+          items:
+            type: string
+
+    # ── /api/run response ──────────────────────────────────────────
+    RunResponse:
+      type: object
+      required: [status, result]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        result:
+          $ref: "#/components/schemas/RunResult"
+
+    RunResult:
+      type: object
+      description: >
+        Result from `/api/run`.  Shape depends on `include_timeseries`.
+      properties:
+        heating:
+          oneOf:
+            - $ref: "#/components/schemas/RunSummaryCarrier"
+            - $ref: "#/components/schemas/RunTimeseriesCarrier"
+        cooling:
+          oneOf:
+            - $ref: "#/components/schemas/RunSummaryCarrier"
+            - $ref: "#/components/schemas/RunTimeseriesCarrier"
+        meta:
+          type: object
+          properties:
+            n_points:
+              type: integer
+              description: Number of hourly time steps
+            elapsed_s:
+              type: number
+              description: Processing time (seconds)
+        forward:
+          type: object
+          description: Present when `forward_url` was specified
+          properties:
+            status_code:
+              type: integer
+            response_text:
+              type: string
+            error:
+              type: string
+
+    RunSummaryCarrier:
+      type: object
+      description: Summary-only shape (default when `include_timeseries=false`).
+      properties:
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        n_points:
+          type: integer
+        heating_total_kWh:
+          type: number
+        heating_peak_kW:
+          type: number
+        cooling_total_kWh:
+          type: number
+        cooling_peak_kW:
+          type: number
+
+    RunTimeseriesCarrier:
+      type: object
+      description: Full time-series shape (`include_timeseries=true`).
+      properties:
+        index:
+          type: array
+          items:
+            type: string
+            format: date-time
+        values:
+          type: array
+          items:
+            type: number
+
+    # ── Error ──────────────────────────────────────────────────────
+    ErrorEnvelope:
+      type: object
+      required: [status, error]
+      properties:
+        status:
+          type: string
+          enum: [error]
+        error:
+          type: string
+          description: Error category
+        message:
+          type: string
+          description: Human-readable detail
+        issues:
+          type: array
+          items:
+            type: string
+          description: List of validation issues
+        trace:
+          type: string
+          description: Stack trace (development only)
+
+  # ── Examples ─────────────────────────────────────────────────────
+  examples:
+    GeojsonRequest:
+      summary: Single Dutch SFH (v3 schema)
+      value:
+        type: FeatureCollection
+        timeStamp: "2024-02-24T12:00:00Z"
+        features:
+          - type: Feature
+            id: building_001
+            geometry:
+              type: Point
+              coordinates: [5, 52]
+            properties:
+              start_time: "2018-01-01T00:00:00Z"
+              end_time: "2018-12-31T23:00:00Z"
+              resolution: "60"
+              resolution_unit: minutes
+              buem:
+                building:
+                  building_type: SFH
+                  construction_period: "1965-1974"
+                  country: NL
+                  n_storeys: 2
+                  A_ref: {value: 100, unit: m2}
+                  h_room: {value: 2.5, unit: m}
+                  neighbour_status: B_Alone
+                  envelope:
+                    elements:
+                      - id: Wall_1
+                        type: wall
+                        area: {value: 30, unit: m2}
+                        azimuth: {value: 0, unit: deg}
+                        tilt: {value: 90, unit: deg}
+                        U: {value: 1.6, unit: "W/(m2K)"}
+                      - id: Roof_1
+                        type: roof
+                        area: {value: 100, unit: m2}
+                        azimuth: {value: 180, unit: deg}
+                        tilt: {value: 30, unit: deg}
+                        U: {value: 1.2, unit: "W/(m2K)"}
+                      - id: Floor_1
+                        type: floor
+                        area: {value: 100, unit: m2}
+                        azimuth: {value: 0, unit: deg}
+                        tilt: {value: 0, unit: deg}
+                        U: {value: 1.5, unit: "W/(m2K)"}
+                      - id: Win_1
+                        type: window
+                        area: {value: 8, unit: m2}
+                        azimuth: {value: 180, unit: deg}
+                        tilt: {value: 90, unit: deg}
+                        parent_id: Wall_1
+                        U: {value: 2.8, unit: "W/(m2K)"}
+                        g_gl: {value: 0.6, unit: "-"}
+                      - id: Vent_1
+                        type: ventilation
+                        air_changes: {value: 0.5, unit: "1/h"}
+                  thermal:
+                    comfortT_lb: {value: 21, unit: degC}
+                    comfortT_ub: {value: 24, unit: degC}
+                solver:
+                  use_milp: false
+
+    PlainConfig:
+      summary: Minimal plain config for /api/run
+      value:
+        A_ref: 100
+        h_room: 2.5
+        components:
+          Walls:
+            U: 1.6
+            elements:
+              - id: w1
+                area: 50.0
+                azimuth: 0
+                tilt: 90
+          Roof:
+            U: 1.2
+            elements:
+              - id: r1
+                area: 100.0
+                azimuth: 180
+                tilt: 30
+          Floor:
+            U: 1.5
+            elements:
+              - id: f1
+                area: 100.0
+                azimuth: 0
+                tilt: 0
+          Windows:
+            U: 2.8
+            g_gl: 0.6
+            elements:
+              - id: win1
+                area: 8.0
+                azimuth: 180
+                tilt: 90
+                surface: w1
+
+    GeojsonResponse:
+      summary: Response excerpt with thermal results
+      value:
+        type: FeatureCollection
+        processed_at: "2024-02-24T12:00:03Z"
+        processing_elapsed_s: 3.12
+        metadata:
+          total_features: 1
+          successful_features: 1
+          failed_features: 0
+          validation_warnings: 0
+        features:
+          - type: Feature
+            id: building_001
+            geometry:
+              type: Point
+              coordinates: [5, 52]
+            properties:
+              start_time: "2018-01-01T00:00:00Z"
+              end_time: "2018-12-31T23:00:00Z"
+              resolution: "60"
+              resolution_unit: minutes
+              buem:
+                building: {"...": "echoed from request"}
+                thermal_load_profile:
+                  start_time: "2018-01-01T00:00:00Z"
+                  end_time: "2018-12-31T23:00:00Z"
+                  resolution: "60"
+                  resolution_unit: minutes
+                  summary:
+                    heating:
+                      total: {value: 4823.5, unit: kWh}
+                      max: {value: 7.8, unit: kW}
+                      min: {value: 0.0, unit: kW}
+                      mean: {value: 0.55, unit: kW}
+                    cooling:
+                      total: {value: 312.4, unit: kWh}
+                      max: {value: 2.1, unit: kW}
+                      min: {value: 0.0, unit: kW}
+                      mean: {value: 0.036, unit: kW}
+                    electricity:
+                      total: {value: 2105.0, unit: kWh}
+                      max: {value: 1.8, unit: kW}
+                      min: {value: 0.05, unit: kW}
+                      mean: {value: 0.24, unit: kW}
+                    total_energy_demand: {value: 7240.9, unit: kWh}
+                    peak_heating_load: {value: 7.8, unit: kW}
+                    peak_cooling_load: {value: 2.1, unit: kW}
+                    energy_intensity: {value: 72.4, unit: "kWh/m2"}
+                model_metadata:
+                  model_version: BUEM-v2.0
+                  solver_used: LP (CLARABEL)
+                  processing_time: {value: 3.12, unit: s}
+                  weather_year: 2018

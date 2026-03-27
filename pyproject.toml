@@ -31,6 +31,7 @@ classifiers = [
 dependencies = [
     "cvxpy",
     "flask",
+    "flask-swagger-ui",
     "joblib",
     "jsonschema",
     "marshmallow>=4.0.0",
@@ -79,6 +80,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
 buem = [
+    "apis/openapi.yaml",
     "data/**/*",
     "softwares/**/*",
     "integration/json_schema/**/*",

@@ -8,6 +8,7 @@ dependencies:
   - coincbc
   - cvxpy
   - flask
+  - flask-swagger-ui
   - joblib
   - jsonschema
   - matplotlib

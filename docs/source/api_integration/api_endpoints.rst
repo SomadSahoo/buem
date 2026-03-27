@@ -3,6 +3,14 @@ API Endpoints
 
 Base URL: ``http://localhost:5000``  (default)
 
+.. tip::
+
+   **Interactive documentation** — Start the server and open
+   ``http://localhost:5000/api/docs`` for an interactive **Swagger UI**
+   where you can browse schemas, try requests, and inspect responses.
+   The underlying OpenAPI 3.1 spec is served at
+   ``http://localhost:5000/api/openapi.yaml``.
+
 POST /api/process
 -----------------
 
@@ -34,6 +42,10 @@ Submit a GeoJSON **FeatureCollection** for batch thermal analysis.
 **200 OK** — returns a GeoJSON FeatureCollection with
 ``thermal_load_profile`` added to each feature's ``properties.buem``.
 
+This endpoint also accepts a plain JSON building config (same payload as
+``/api/run``).  Detection is automatic based on the presence of a GeoJSON
+``type`` field.
+
 POST /api/run
 -------------
 
@@ -60,7 +72,7 @@ directly:
 
 .. code-block:: bash
 
-   curl "http://localhost:5000/api/files/buem_ts_abc123.json" -o ts.json
+   curl "http://localhost:5000/api/files/buem_ts_abc123.json.gz" -o ts.json.gz
 
 GET /api/health
 ---------------
@@ -69,7 +81,20 @@ Health check.
 
 .. code-block:: json
 
-   {"status": "healthy", "version": "0.1.2", "timestamp": "..."}
+   {"status": "ok"}
+
+GET /api/docs
+-------------
+
+Opens the **Swagger UI** — an interactive browser for all endpoints,
+schemas, and examples defined in the OpenAPI 3.1 spec.
+
+GET /api/openapi.yaml
+---------------------
+
+Returns the raw **OpenAPI 3.1** specification in YAML format.  This file
+can be imported into Swagger Editor, Postman, or any OpenAPI-compatible
+tool.
 
 Error Responses
 ---------------
@@ -86,11 +111,9 @@ All endpoints return a consistent error envelope:
 .. code-block:: json
 
    {
-     "error": {
-       "code": "VALIDATION_ERROR",
-       "message": "Building attribute validation failed",
-       "details": ["components.Walls.U must be positive"]
-     }
+     "status": "error",
+     "error": "validation_failed",
+     "issues": ["building.envelope.elements is required"]
    }
 
 .. note::

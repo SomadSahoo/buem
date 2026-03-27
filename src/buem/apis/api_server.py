@@ -1,4 +1,5 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
+from flask_swagger_ui import get_swaggerui_blueprint
 from buem.env import load_env
 from pathlib import Path
 import logging
@@ -15,10 +16,27 @@ load_env()
 DEFAULT_LOG = Path(__file__).resolve().parents[2] / "logs" / "buem_api.log"
 LOG_FILE = Path(os.environ.get("BUEM_LOG_FILE") or DEFAULT_LOG)
 
+# Swagger UI configuration
+SWAGGER_URL = "/api/docs"
+OPENAPI_URL = "/api/openapi.yaml"
+OPENAPI_DIR = Path(__file__).resolve().parent
+
 def create_app():
     app = Flask(__name__)
     app.register_blueprint(model_bp)
     app.register_blueprint(files_bp)  # register files endpoint
+
+    # Serve openapi.yaml and register Swagger UI
+    @app.route(OPENAPI_URL)
+    def openapi_spec():
+        return send_from_directory(str(OPENAPI_DIR), "openapi.yaml", mimetype="text/yaml")
+
+    swagger_bp = get_swaggerui_blueprint(
+        SWAGGER_URL,
+        OPENAPI_URL,
+        config={"app_name": "BuEM API"},
+    )
+    app.register_blueprint(swagger_bp, url_prefix=SWAGGER_URL)
 
     # centralized logging - rotates to limit disk usage
     logdir = LOG_FILE.parent
