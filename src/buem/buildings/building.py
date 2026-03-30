@@ -91,6 +91,10 @@ class ThermalProperties:
         Specific internal heat gains [W/m²].  ``None`` → use model default.
     q_w_nd : float or None
         Specific hot-water demand [kWh/(m²·a)].  ``None`` → not provided.
+    F_red_htr : float
+        Intermittent heating reduction factor (ISO 13790 §13.2.2).
+        Reduces effective transmission losses due to night/weekend setback.
+        TABULA ``F_red_htr1``: 0.95 (AB/MFH), 0.90 (SFH/TH).  1.0 = no reduction.
     """
 
     n_air_infiltration: float = 0.5
@@ -107,6 +111,7 @@ class ThermalProperties:
     h_room: float = 2.5
     phi_int: Optional[float] = None
     q_w_nd: Optional[float] = None
+    F_red_htr: float = 1.0
 
 
 @dataclass
@@ -200,11 +205,22 @@ class Building:
         thermal_node: Dict[str, Any] = {
             "n_air_infiltration": {"value": round(th.n_air_infiltration, 4), "unit": "1/h"},
             "n_air_use": {"value": round(th.n_air_use, 4), "unit": "1/h"},
+            "c_m": {"value": round(th.c_m, 2), "unit": "kJ/(m2K)"},
+            "comfortT_lb": {"value": round(th.comfortT_lb, 1), "unit": "degC"},
+            "comfortT_ub": {"value": round(th.comfortT_ub, 1), "unit": "degC"},
+            "design_T_min": {"value": round(th.design_T_min, 1), "unit": "degC"},
+            "F_sh_hor": {"value": round(th.F_sh_hor, 4), "unit": "-"},
+            "F_sh_vert": {"value": round(th.F_sh_vert, 4), "unit": "-"},
+            "F_f": {"value": round(th.F_f, 4), "unit": "-"},
+            "F_w": {"value": round(th.F_w, 4), "unit": "-"},
+            "F_red_htr": {"value": round(th.F_red_htr, 4), "unit": "-"},
         }
         if th.thermal_class:
             thermal_node["thermal_class"] = th.thermal_class
-        thermal_node["comfortT_lb"] = {"value": round(th.comfortT_lb, 1), "unit": "degC"}
-        thermal_node["comfortT_ub"] = {"value": round(th.comfortT_ub, 1), "unit": "degC"}
+        if th.phi_int is not None:
+            thermal_node["phi_int"] = {"value": round(th.phi_int, 2), "unit": "W/m2"}
+        if th.q_w_nd is not None:
+            thermal_node["q_w_nd"] = {"value": round(th.q_w_nd, 2), "unit": "kWh/(m2a)"}
 
         # --- building node (envelope + thermal nested inside) ---
         building_node: Dict[str, Any] = {

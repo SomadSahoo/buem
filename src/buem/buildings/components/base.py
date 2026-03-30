@@ -73,6 +73,12 @@ class EnvelopeElement:
         if self.element_type == "ventilation":
             if self.air_changes is not None:
                 d["air_changes"] = {"value": round(self.air_changes, 4), "unit": "1/h"}
+            if self.area > 0:
+                d["area"] = {"value": round(self.area, 2), "unit": "m2"}
+            if self.surface is not None:
+                d["parent_id"] = self.surface
+                d["azimuth"] = {"value": round(self.azimuth, 1), "unit": "deg"}
+                d["tilt"] = {"value": round(self.tilt, 1), "unit": "deg"}
             return d
 
         # Geometry
@@ -93,7 +99,5 @@ class EnvelopeElement:
                 d["g_gl"] = {"value": round(self.g_gl, 4), "unit": "-"}
         else:
             d["b_transmission"] = {"value": round(self.b_transmission, 4), "unit": "-"}
-
-        return d
 
         return d

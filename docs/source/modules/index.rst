@@ -9,6 +9,7 @@ users and developers.
 .. toctree::
    :maxdepth: 2
 
+   buildings
    thermal
    config
    weather

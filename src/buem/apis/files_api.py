@@ -4,7 +4,7 @@ import os
 bp = Blueprint("files_api", __name__, url_prefix="/api/files")
 
 # directory to store/download large results (set via env BUEM_RESULTS_DIR or fallback)
-RESULTS_DIR = os.environ.get("BUEM_RESULTS_DIR", r"C:\test\buem\results")
+RESULTS_DIR = os.environ.get("BUEM_RESULTS_DIR", r"D:\test\buem\src\buem\results")
 
 @bp.route("/<path:filename>", methods=["GET"])
 def download_file(filename):

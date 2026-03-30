@@ -611,12 +611,24 @@ class GeoJsonValidator:
                 comp_data['U'] = u_values[0]
                 for e in elems:
                     e.pop('U', None)
+
+        # Ensure all required component types exist (validator expects all five)
+        _default_U = {'Walls': 1.0, 'Windows': 2.8, 'Roof': 1.0, 'Floor': 1.0, 'Doors': 3.0}
+        for required in ('Walls', 'Windows', 'Roof', 'Floor', 'Doors'):
+            if required not in components:
+                components[required] = {'U': _default_U[required], 'elements': []}
         
         # Extract thermal parameters
         n_air_infiltration = extract_value(thermal.get('n_air_infiltration', 0.5))
         n_air_use = extract_value(thermal.get('n_air_use', 0.5))
         comfortT_lb = extract_value(thermal.get('comfortT_lb', 21))
         comfortT_ub = extract_value(thermal.get('comfortT_ub', 24))
+        c_m = extract_value(thermal.get('c_m', 165.0))
+        design_T_min = extract_value(thermal.get('design_T_min', -12.0))
+        F_sh_hor = extract_value(thermal.get('F_sh_hor', 0.8))
+        F_sh_vert = extract_value(thermal.get('F_sh_vert', 0.75))
+        F_f = extract_value(thermal.get('F_f', 0.2))
+        F_w = extract_value(thermal.get('F_w', 1.0))
         
         # Build v2 building_attributes
         building_attributes = {
@@ -630,7 +642,28 @@ class GeoJsonValidator:
             'n_air_use': n_air_use,
             'comfortT_lb': comfortT_lb,
             'comfortT_ub': comfortT_ub,
+            'c_m': c_m,
+            'design_T_min': design_T_min,
+            'F_sh_hor': F_sh_hor,
+            'F_sh_vert': F_sh_vert,
+            'F_f': F_f,
+            'F_w': F_w,
         }
+
+        # Optional thermal parameters (pass through when present)
+        for thermal_key in ('phi_int', 'q_w_nd', 'F_red_htr'):
+            if thermal_key in thermal:
+                building_attributes[thermal_key] = extract_value(thermal[thermal_key])
+
+        # thermalClass (v3 uses 'thermal_class')
+        tc = thermal.get('thermal_class')
+        if tc:
+            building_attributes['thermalClass'] = tc
+
+        # g_gl_n_Window: extract from Windows component g_gl if set
+        win_comp = components.get('Windows', {})
+        if 'g_gl' in win_comp:
+            building_attributes['g_gl_n_Window'] = win_comp['g_gl']
         
         # Optional building metadata
         for key in ('building_type', 'construction_period', 'country', 'n_storeys',

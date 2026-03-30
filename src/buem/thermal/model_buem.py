@@ -260,7 +260,8 @@ class ModelBUEM(object):
                         if "U" not in e or "area" not in e:
                             raise ValueError(f"Element {e.get('id', 'unknown')} in {comp_name} missing U or area")
                         try:
-                            total_conductance += float(e["U"]) * float(e["area"])
+                            e_b = float(e.get("b_transmission", 1.0))
+                            total_conductance += float(e["U"]) * float(e["area"]) * e_b
                         except Exception:
                             raise ValueError(f"components.{comp_name}.elements contains invalid U or area for element {e.get('id', 'unknown')}")
                     # store None to indicate per-element U was used; bH uses computed conductance (kW/K)
@@ -900,6 +901,19 @@ class ModelBUEM(object):
         # Windows and Doors are optional:
         H_windows = self.bH["Windows"]["Original"] if "Windows" in self.bH and "Original" in self.bH["Windows"] else 0.0
         H_doors   = self.bH["Doors"]["Original"]   if "Doors"   in self.bH and "Original" in self.bH["Doors"]   else 0.0
+
+        # ISO 13790 §13.2.2: intermittent heating reduction factor.
+        # Reduces transmission conductances to account for night/absence setback
+        # not explicitly modelled by the hourly comfort bounds.
+        # TABULA F_red_htr1: 0.95 (AB/MFH) or 0.90 (SFH/TH); default 1.0 = no reduction.
+        F_red = float(self.cfg.get("F_red_htr", 1.0))
+        if not (0.0 < F_red <= 1.0):
+            raise ValueError(f"F_red_htr must be in (0, 1], got {F_red}")
+        H_walls   *= F_red
+        H_roofs   *= F_red
+        H_floors  *= F_red
+        H_windows *= F_red
+        H_doors   *= F_red
 
         # Total transmission conductance and opaque-only mass-node conductance.
         H_tot = H_ve + H_walls + H_roofs + H_floors + H_windows + H_doors

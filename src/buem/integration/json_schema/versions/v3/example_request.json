@@ -291,6 +291,10 @@
                 "value": 0.5,
                 "unit": "1/h"
               },
+              "c_m": {
+                "value": 165.0,
+                "unit": "kJ/(m2K)"
+              },
               "thermal_class": "medium",
               "comfortT_lb": {
                 "value": 21,
@@ -299,6 +303,30 @@
               "comfortT_ub": {
                 "value": 24,
                 "unit": "degC"
+              },
+              "design_T_min": {
+                "value": -12.0,
+                "unit": "degC"
+              },
+              "F_sh_hor": {
+                "value": 0.80,
+                "unit": "-"
+              },
+              "F_sh_vert": {
+                "value": 0.75,
+                "unit": "-"
+              },
+              "F_f": {
+                "value": 0.20,
+                "unit": "-"
+              },
+              "F_w": {
+                "value": 1.0,
+                "unit": "-"
+              },
+              "F_red_htr": {
+                "value": 0.95,
+                "unit": "-"
               }
             }
           },

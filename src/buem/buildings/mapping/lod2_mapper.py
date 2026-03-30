@@ -1,8 +1,15 @@
 """
-LOD2 + TABULA → Building mapper.
+LOD2 + TABULA → Building mapper (orchestration).
 
 Reads raw DataFrames from any ``BuildingSource`` (Excel or PostgreSQL) and
 produces a list of canonical ``Building`` objects ready for v3 JSON generation.
+
+This module orchestrates the mapping pipeline.  Domain-specific logic is
+delegated to focused helper modules:
+
+- **element_factory** — window, door, ventilation element creation
+- **tabula_helpers** — TABULA variant selection, window ratios, safe numerics
+- **wall_classifier** — shared (party) wall detection
 
 Table linkages
 --------------
@@ -11,29 +18,58 @@ Table linkages
 
 Surface classification
 ----------------------
-- ``objectclass_id = 709`` → WallSurface  (tilt DB 0 → v3 90°, azimuth from DB)
-- ``objectclass_id = 710`` → GroundSurface (tilt DB −90 → v3 0°, azimuth → 0°)
-- ``objectclass_id = 712`` → RoofSurface  (tilt from DB clamped 0–90, azimuth → 180°)
+- ``objectclass_id = 709`` → WallSurface  (tilt always 90°; azimuth from DB, −1 → 0°)
+- ``objectclass_id = 710`` → GroundSurface (tilt always 0°; azimuth always 0°)
+- ``objectclass_id = 712`` → RoofSurface  (tilt: DB≥0 → as-is, DB<0 → 0°; azimuth always 0°)
 
-TABULA variant selection
-------------------------
-Each component type (wall, roof, floor) may have multiple TABULA variants
-(Wall_1/2/3, Roof_1/2, Floor_1/2) with different U-values and b_transmission
-factors.  Only the *primary exterior variant* — the one with the largest area
-and b_transmission > 0 — is used for LOD2 surfaces.  Windows are synthesised
-from TABULA directional window areas (``A_Window_North/South/East/West``).
+Party-wall detection
+--------------------
+A wall is *shared* (party wall) when its ``surface_feature_id`` appears under
+two or more ``building_feature_id`` values.  For shared walls:
+
+- ``U = 0``  (adjacent heated space — no net heat transfer)
+- ``b_transmission = 0``
+- No windows, doors, or ventilation openings on shared walls
+
+Front / back wall identification
+--------------------------------
+After filtering out party walls, the **front wall** is the exposed wall with the
+largest area.  The **back wall** is the exposed wall whose azimuth is closest
+to 180° opposite the front wall's azimuth (within a 90° tolerance; if no
+candidate is close enough, there is no back wall).
+
+Window / door / ventilation sizing
+-----------------------------------
+Window and door areas are **proportional** to actual LOD2 wall areas via TABULA
+ratios.  Ventilation openings (1.0 m² front, 0.5 m² back) are capped at 10 %
+of wall area and subtracted from the wall's opaque area.  See
+:mod:`~buem.buildings.mapping.element_factory` for details.
 """
 
 from __future__ import annotations
 
 import logging
-import math
+from dataclasses import dataclass
 from typing import List, Optional, Protocol, Tuple
 
 import pandas as pd
 
 from buem.buildings.building import Building, BuildingIdentity, ThermalProperties
 from buem.buildings.components.base import EnvelopeElement
+from buem.buildings.mapping.element_factory import (
+    assign_vent_areas,
+    create_door,
+    create_ventilation,
+    create_windows,
+)
+from buem.buildings.mapping.tabula_helpers import (
+    azimuth_diff,
+    azimuth_to_direction,
+    compute_window_ratios,
+    safe_series_float,
+    select_primary_variant,
+)
+from buem.buildings.mapping.wall_classifier import SharedWallDetector
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +79,10 @@ OBJECTCLASS_WALL = 709
 OBJECTCLASS_GROUND = 710
 OBJECTCLASS_ROOF = 712
 
-# Cardinal direction bins for window distribution (azimuth ranges in degrees)
-# Each bin: (label, centre_azimuth, lower_bound, upper_bound)
-_DIRECTION_BINS = [
-    ("north", 0.0, 315.0, 45.0),    # wraps around 0°
-    ("east", 90.0, 45.0, 135.0),
-    ("south", 180.0, 135.0, 225.0),
-    ("west", 270.0, 225.0, 315.0),
-]
+# Maximum acceptable angular deviation (°) between a candidate back wall and
+# the ideal opposite azimuth.  Beyond this threshold no true back wall exists
+# (all exposed surfaces face roughly the same way → no cross-ventilation).
+_BACK_WALL_ANGLE_LIMIT = 90.0
 
 
 class BuildingSource(Protocol):
@@ -70,6 +102,26 @@ class BuildingSource(Protocol):
     def get_tabula_row(self, tabula_id: float) -> Optional[pd.Series]: ...
 
 
+@dataclass
+class _WallInfo:
+    """Internal record for a classified wall surface."""
+
+    wall_id: str
+    surface_feature_id: int
+    area: float
+    azimuth: float
+    is_shared: bool
+    direction: str = ""       # cardinal direction (north/east/south/west)
+    window_area: float = 0.0  # proportional window area placed on this wall
+    door_area: float = 0.0    # proportional door area placed on this wall
+    vent_area: float = 0.0    # ventilation opening area on this wall
+
+    @property
+    def net_area(self) -> float:
+        """Opaque wall area after subtracting windows, doors, and vent openings."""
+        return max(0.0, self.area - self.window_area - self.door_area - self.vent_area)
+
+
 class LOD2Mapper:
     """Map LOD2 geometry + TABULA typology into canonical Building objects.
 
@@ -85,16 +137,13 @@ class LOD2Mapper:
     def __init__(self, source: BuildingSource, country: str = "DE"):
         self.source = source
         self.country = country
+        # Pre-compute shared wall set once across the full surface table
+        self._shared_detector = SharedWallDetector(source.surfaces)
 
     # ── public API ───────────────────────────────────────────────────────────
 
     def map_building(self, building_feature_id: int) -> Optional[Building]:
         """Map a single building from LOD2 + TABULA data.
-
-        Parameters
-        ----------
-        building_feature_id : int
-            The ``building_feature_id`` from the building table.
 
         Returns
         -------
@@ -127,39 +176,79 @@ class LOD2Mapper:
             return None
 
         # 4. Classify surfaces into walls, roofs, floors
-        walls_df = surfaces_df[surfaces_df["objectclass_id"] == OBJECTCLASS_WALL]
-        roofs_df = surfaces_df[surfaces_df["objectclass_id"] == OBJECTCLASS_ROOF]
-        floors_df = surfaces_df[surfaces_df["objectclass_id"] == OBJECTCLASS_GROUND]
+        #    Skip near-zero-area surfaces (LOD2 geometry artefacts, e.g. 1e-16 m²)
+        valid = surfaces_df[surfaces_df["surface_area"] > 0.01]
+        walls_df = valid[valid["objectclass_id"] == OBJECTCLASS_WALL]
+        roofs_df = valid[valid["objectclass_id"] == OBJECTCLASS_ROOF]
+        floors_df = valid[valid["objectclass_id"] == OBJECTCLASS_GROUND]
 
         # 5. Select primary TABULA variants for each component type
-        wall_U, wall_b = self._select_primary_variant(tabula_row, "Wall", n_variants=3)
-        roof_U, roof_b = self._select_primary_variant(tabula_row, "Roof", n_variants=2)
-        floor_U, floor_b = self._select_primary_variant(tabula_row, "Floor", n_variants=2)
-        window_U = self._safe_float(tabula_row, "U_Window_1", 2.8)
-        window_g_gl = self._safe_float(tabula_row, "g_gl_n_Window_1", 0.5)
-        door_U = self._safe_float(tabula_row, "U_Door_1", 3.0)
+        wall_U, wall_b = select_primary_variant(tabula_row, "Wall", n_variants=3)
+        roof_U, roof_b = select_primary_variant(tabula_row, "Roof", n_variants=2)
+        floor_U, floor_b = select_primary_variant(tabula_row, "Floor", n_variants=2)
+        window_U = safe_series_float(tabula_row, "U_Window_1", 2.8)
+        window_g_gl = safe_series_float(tabula_row, "g_gl_n_Window_1", 0.5)
+        door_U = safe_series_float(tabula_row, "U_Door_1", 3.0)
 
-        # 6. Build envelope elements
+        # 6. Classify walls into shared (party) vs exposed
+        wall_infos = self._classify_walls(walls_df)
+        exposed_walls = [w for w in wall_infos if not w.is_shared]
+
+        logger.debug(
+            "Building %d: %d walls (%d exposed, %d shared)",
+            building_feature_id, len(wall_infos),
+            len(exposed_walls), len(wall_infos) - len(exposed_walls),
+        )
+
+        # 7. Identify front wall (largest exposed) and back wall (opposite)
+        front_wall, back_wall = self._identify_front_back(exposed_walls)
+
+        # 8. Compute proportional window/door areas on each exposed wall
+        a_wall_1 = safe_series_float(tabula_row, "A_Wall_1", 0.0)
+        win_ratios = compute_window_ratios(tabula_row, a_wall_1)
+        door_ratio = (
+            safe_series_float(tabula_row, "A_Door_1", 0.0) / a_wall_1
+            if a_wall_1 > 0 else 0.0
+        )
+
+        for w in exposed_walls:
+            w.direction = azimuth_to_direction(w.azimuth)
+            w.window_area = win_ratios.get(w.direction, 0.0) * w.area
+        if front_wall is not None:
+            front_wall.door_area = door_ratio * front_wall.area
+
+        # Assign ventilation opening areas to front/back walls
+        assign_vent_areas(front_wall, back_wall)
+
+        # 9. Build envelope elements
+        #    (steps 10-12 follow below: identity, thermal, A_ref)
         elements: List[EnvelopeElement] = []
-        wall_counter = 0
-        roof_counter = 0
-        floor_counter = 0
 
-        # --- walls ---
-        for _, row in walls_df.iterrows():
-            wall_counter += 1
-            azimuth = self._normalise_azimuth(row["azimuth"])
-            elements.append(EnvelopeElement(
-                id=f"wall_{wall_counter}",
-                element_type="wall",
-                area=float(row["surface_area"]),
-                azimuth=azimuth,
-                tilt=90.0,  # DB stores 0 for walls → v3 uses 90°
-                U=wall_U,
-                b_transmission=wall_b,
-            ))
+        # --- walls (shared → U=0, exposed → net area after openings) ---
+        for w in wall_infos:
+            if w.is_shared:
+                elements.append(EnvelopeElement(
+                    id=w.wall_id,
+                    element_type="wall",
+                    area=w.area,
+                    azimuth=w.azimuth,
+                    tilt=90.0,
+                    U=0.0,
+                    b_transmission=0.0,
+                ))
+            else:
+                elements.append(EnvelopeElement(
+                    id=w.wall_id,
+                    element_type="wall",
+                    area=w.net_area,
+                    azimuth=w.azimuth,
+                    tilt=90.0,
+                    U=wall_U,
+                    b_transmission=wall_b,
+                ))
 
         # --- roofs ---
+        roof_counter = 0
         for _, row in roofs_df.iterrows():
             roof_counter += 1
             tilt = self._convert_roof_tilt(row["tilt"])
@@ -167,13 +256,14 @@ class LOD2Mapper:
                 id=f"roof_{roof_counter}",
                 element_type="roof",
                 area=float(row["surface_area"]),
-                azimuth=180.0,  # DB has -1 for roofs → use south-facing placeholder
+                azimuth=0.0,  # placeholder — no role in solar calcs for roofs
                 tilt=tilt,
                 U=roof_U,
                 b_transmission=roof_b,
             ))
 
         # --- floors ---
+        floor_counter = 0
         for _, row in floors_df.iterrows():
             floor_counter += 1
             elements.append(EnvelopeElement(
@@ -186,38 +276,32 @@ class LOD2Mapper:
                 b_transmission=floor_b,
             ))
 
-        # --- windows (synthesised from TABULA directional areas) ---
-        window_elements = self._synthesise_windows(
-            tabula_row=tabula_row,
-            walls_df=walls_df,
-            window_U=window_U,
-            window_g_gl=window_g_gl,
-        )
-        elements.extend(window_elements)
+        # --- windows (proportional, only on exposed walls) ---
+        elements.extend(create_windows(exposed_walls, window_U, window_g_gl))
 
-        # --- door (single element from TABULA) ---
-        elements.append(EnvelopeElement(
-            id="door_1",
-            element_type="door",
-            area=2.0,  # TABULA standard door area
-            azimuth=0.0,
-            tilt=90.0,
-            U=door_U,
-            b_transmission=1.0,
-        ))
+        # Horizontal / skylight windows from TABULA (independent of walls)
+        horizontal = safe_series_float(tabula_row, "A_Window_Horizontal", 0.0)
+        if horizontal > 0:
+            elements.append(EnvelopeElement(
+                id="win_horizontal",
+                element_type="window",
+                area=horizontal,
+                azimuth=0.0,
+                tilt=0.0,
+                U=window_U,
+                g_gl=window_g_gl,
+            ))
 
-        # --- ventilation ---
-        n_air_use = self._safe_float(tabula_row, "n_air_use", 0.5)
-        elements.append(EnvelopeElement(
-            id="vent_main",
-            element_type="ventilation",
-            area=0.0,
-            azimuth=0.0,
-            tilt=0.0,
-            air_changes=n_air_use,
-        ))
+        # --- door (proportional, on front wall) ---
+        door_elem = create_door(front_wall, door_U)
+        if door_elem is not None:
+            elements.append(door_elem)
 
-        # 7. Build identity
+        # --- ventilation (front wall + back wall) ---
+        n_air_use = safe_series_float(tabula_row, "n_air_use", 0.5)
+        elements.extend(create_ventilation(front_wall, back_wall, n_air_use))
+
+        # 10. Build identity
         building_type = self._extract_building_type(tabula_row)
         construction_period = self._extract_construction_period(tabula_row)
         neighbour_status = str(tabula_row.get("Code_AttachedNeighbours", "B_Alone"))
@@ -233,20 +317,23 @@ class LOD2Mapper:
             neighbour_status=neighbour_status,
         )
 
-        # 8. Build thermal properties
+        # 11. Build thermal properties
         thermal = ThermalProperties(
-            n_air_infiltration=self._safe_float(tabula_row, "n_air_infiltration", 0.5),
+            n_air_infiltration=safe_series_float(tabula_row, "n_air_infiltration", 0.5),
             n_air_use=n_air_use,
-            c_m=self._safe_float(tabula_row, "c_m", 165.0),
-            h_room=self._safe_float(tabula_row, "h_room", 2.5),
-            F_sh_hor=self._safe_float(tabula_row, "F_sh_hor", 0.8),
-            F_sh_vert=self._safe_float(tabula_row, "F_sh_vert", 0.75),
-            F_f=self._safe_float(tabula_row, "F_f", 0.2),
-            F_w=self._safe_float(tabula_row, "F_w", 1.0),
-            phi_int=self._safe_float(tabula_row, "phi_int", None),
+            c_m=safe_series_float(tabula_row, "c_m", 165.0),
+            h_room=safe_series_float(tabula_row, "h_room", 2.5),
+            F_sh_hor=safe_series_float(tabula_row, "F_sh_hor", 0.8),
+            F_sh_vert=safe_series_float(tabula_row, "F_sh_vert", 0.75),
+            F_f=safe_series_float(tabula_row, "F_f", 0.2),
+            F_w=safe_series_float(tabula_row, "F_w", 1.0),
+            phi_int=safe_series_float(tabula_row, "phi_int", None),
+            q_w_nd=safe_series_float(tabula_row, "q_w_nd", None),
+            design_T_min=safe_series_float(tabula_row, "Theta_e", -12.0),
+            F_red_htr=safe_series_float(tabula_row, "F_red_htr1", 1.0),
         )
 
-        # 9. Compute reference floor area from LOD2 floor areas
+        # 12. Compute reference floor area from LOD2 floor areas
         a_ref = float(bldg_row.get("area_total_floor", 0.0) or 0.0)
         if a_ref == 0.0:
             a_ref = sum(float(r["surface_area"]) for _, r in floors_df.iterrows())
@@ -297,144 +384,98 @@ class LOD2Mapper:
         )
         return buildings
 
-    # ── private helpers ──────────────────────────────────────────────────────
+    # ── wall classification ──────────────────────────────────────────────────
+
+    def _classify_walls(self, walls_df: pd.DataFrame) -> List[_WallInfo]:
+        """Classify each wall as shared (party) or exposed using surface_feature_id.
+
+        Returns a list of ``_WallInfo`` in the same iteration order as the
+        input DataFrame, with sequential IDs ``wall_1``, ``wall_2``, etc.
+        Logs a warning when an exposed wall has a negative (unknown) azimuth.
+        """
+        result: List[_WallInfo] = []
+        for idx, (_, row) in enumerate(walls_df.iterrows(), start=1):
+            sfid = int(row["surface_feature_id"])
+            raw_az = row["azimuth"]
+            azimuth = self._normalise_azimuth(raw_az)
+            is_shared = self._shared_detector.is_shared(sfid)
+
+            # Log negative azimuth conversion for traceability
+            if pd.notna(raw_az) and float(raw_az) < 0:
+                if is_shared:
+                    logger.debug(
+                        "wall_%d (sfid=%d): shared wall azimuth %.1f → 0°",
+                        idx, sfid, float(raw_az),
+                    )
+                else:
+                    logger.warning(
+                        "wall_%d (sfid=%d): EXPOSED wall azimuth %.1f → 0° "
+                        "(unknown orientation — window/door placement may be inaccurate)",
+                        idx, sfid, float(raw_az),
+                    )
+
+            result.append(_WallInfo(
+                wall_id=f"wall_{idx}",
+                surface_feature_id=sfid,
+                area=float(row["surface_area"]),
+                azimuth=azimuth,
+                is_shared=is_shared,
+            ))
+        return result
+
+    # ── front / back wall identification ─────────────────────────────────────
 
     @staticmethod
-    def _select_primary_variant(
-        tabula_row: pd.Series, component: str, n_variants: int
-    ) -> Tuple[float, float]:
-        """Select the primary TABULA variant for a component type.
+    def _identify_front_back(
+        exposed_walls: List[_WallInfo],
+    ) -> Tuple[Optional[_WallInfo], Optional[_WallInfo]]:
+        """Identify the front wall (largest exposed) and the back wall (opposite).
 
-        Picks the variant with the largest area that has b_transmission > 0.
-        Falls back to variant 1 if no variant qualifies.
-
-        Parameters
-        ----------
-        tabula_row : pd.Series
-            A single TABULA row.
-        component : str
-            Component name: ``"Wall"``, ``"Roof"``, or ``"Floor"``.
-        n_variants : int
-            Number of variants to check (e.g. 3 for walls, 2 for roof/floor).
+        The front wall is the exposed wall with the largest area.
+        The back wall is the exposed wall whose azimuth is closest to 180°
+        from the front wall's azimuth (i.e. facing the opposite direction).
+        If only one exposed wall exists, it serves as both front and back.
 
         Returns
         -------
-        tuple of (U_value, b_transmission)
+        (front_wall, back_wall) — either may be ``None`` if no exposed walls.
         """
-        best_area = -1.0
-        best_U = 1.0
-        best_b = 1.0
+        if not exposed_walls:
+            return None, None
 
-        for i in range(1, n_variants + 1):
-            area_col = f"A_{component}_{i}"
-            u_col = f"U_{component}_{i}"
-            b_col = f"b_Transmission_{component}_{i}"
+        # Front wall = largest area among exposed walls
+        front = max(exposed_walls, key=lambda w: w.area)
 
-            area = float(tabula_row.get(area_col, 0.0) or 0.0)
-            b_val = float(tabula_row.get(b_col, 0.0) or 0.0)
+        if len(exposed_walls) == 1:
+            return front, front
 
-            if b_val > 0 and area > best_area:
-                best_area = area
-                best_U = float(tabula_row.get(u_col, 1.0) or 1.0)
-                best_b = b_val
-
-        # Fallback: if no variant had b > 0, use variant 1
-        if best_area < 0:
-            best_U = float(tabula_row.get(f"U_{component}_1", 1.0) or 1.0)
-            best_b = float(tabula_row.get(f"b_Transmission_{component}_1", 1.0) or 1.0)
-
-        return best_U, best_b
-
-    @staticmethod
-    def _synthesise_windows(
-        tabula_row: pd.Series,
-        walls_df: pd.DataFrame,
-        window_U: float,
-        window_g_gl: float,
-    ) -> List[EnvelopeElement]:
-        """Create window elements from TABULA directional window areas.
-
-        TABULA provides total window areas per direction (N/S/E/W + Horizontal).
-        These are distributed proportionally across wall surfaces facing each
-        direction, then one window element is created per non-zero direction.
-
-        Parameters
-        ----------
-        tabula_row : pd.Series
-            TABULA typology row.
-        walls_df : pd.DataFrame
-            LOD2 wall surfaces for this building.
-        window_U : float
-            Window U-value [W/(m²K)].
-        window_g_gl : float
-            Window solar heat gain coefficient.
-
-        Returns
-        -------
-        list of EnvelopeElement
-            Window elements (one per cardinal direction with area > 0).
-        """
-        windows: List[EnvelopeElement] = []
-        counter = 0
-
-        # Directional window areas from TABULA
-        dir_areas = {
-            "north": float(tabula_row.get("A_Window_North", 0.0) or 0.0),
-            "east": float(tabula_row.get("A_Window_East", 0.0) or 0.0),
-            "south": float(tabula_row.get("A_Window_South", 0.0) or 0.0),
-            "west": float(tabula_row.get("A_Window_West", 0.0) or 0.0),
-        }
-
-        # Horizontal windows (skylights) — add to roof-facing windows
-        horizontal = float(tabula_row.get("A_Window_Horizontal", 0.0) or 0.0)
-
-        # Find parent wall IDs per direction for proper linkage
-        wall_ids_by_dir = _classify_walls_by_direction(walls_df)
-
-        for direction, (label, centre_az, _, _) in zip(
-            ["north", "east", "south", "west"], _DIRECTION_BINS
-        ):
-            area = dir_areas.get(direction, 0.0)
-            if area <= 0:
+        # Back wall = closest to 180° opposite front azimuth, within threshold
+        opposite_az = (front.azimuth + 180.0) % 360.0
+        best_back: Optional[_WallInfo] = None
+        best_delta = float("inf")
+        for w in exposed_walls:
+            if w.wall_id == front.wall_id:
                 continue
+            delta = abs(azimuth_diff(w.azimuth, opposite_az))
+            if delta < best_delta:
+                best_delta = delta
+                best_back = w
 
-            counter += 1
-            # Link to the first wall in this direction, if any
-            parent_walls = wall_ids_by_dir.get(direction, [])
-            parent_id = parent_walls[0] if parent_walls else None
+        # Only accept the candidate if it is within the angular limit;
+        # otherwise there is no true opposite wall for cross-ventilation.
+        if best_delta > _BACK_WALL_ANGLE_LIMIT:
+            best_back = None
 
-            windows.append(EnvelopeElement(
-                id=f"win_{direction}",
-                element_type="window",
-                area=area,
-                azimuth=centre_az,
-                tilt=90.0,
-                U=window_U,
-                g_gl=window_g_gl,
-                surface=parent_id,
-            ))
+        return front, best_back
 
-        # Horizontal/skylight windows
-        if horizontal > 0:
-            counter += 1
-            windows.append(EnvelopeElement(
-                id="win_horizontal",
-                element_type="window",
-                area=horizontal,
-                azimuth=180.0,
-                tilt=0.0,  # horizontal
-                U=window_U,
-                g_gl=window_g_gl,
-            ))
-
-        return windows
+    # ── generic helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _normalise_azimuth(azimuth: float) -> float:
         """Convert DB azimuth to 0–360° range.
 
-        The database stores -1 for roofs/floors (handled elsewhere).
-        Wall azimuths are real compass bearings but may need normalisation.
+        Negative or NaN values are mapped to 0° (North).  A warning is
+        logged by ``_classify_walls`` when this affects an exposed wall.
         """
         if pd.isna(azimuth) or azimuth < 0:
             return 0.0
@@ -442,76 +483,23 @@ class LOD2Mapper:
 
     @staticmethod
     def _convert_roof_tilt(db_tilt: float) -> float:
-        """Convert DB roof tilt to v3 convention (0–90°).
+        """Convert DB roof tilt to pvlib convention [0, 90]°.
 
-        The DB stores the actual measured tilt angle, which can be
-        near 90° for steep roofs.  We clamp to [0, 90] range.
+        The DB already stores tilt in pvlib convention (0° = horizontal,
+        90° = vertical).  Negative values (2,524 roof surfaces) are
+        treated as 0° (flat) until a better correction is available.
         """
-        if pd.isna(db_tilt):
-            return 30.0  # default pitched roof
-        tilt = abs(float(db_tilt))
-        # DB stores values like 88.28° — convert to angle from horizontal
-        # In the DB, 90° means vertical. For roofs, the v3 tilt is from horizontal.
-        # A nearly-vertical tilt in the DB represents a steep surface.
-        return min(max(tilt, 0.0), 90.0)
+        if pd.isna(db_tilt) or db_tilt < 0:
+            return 0.0  # negative or missing → flat roof
+        return min(float(db_tilt), 90.0)
 
     @staticmethod
     def _extract_building_type(tabula_row: pd.Series) -> str:
         """Extract building size class from TABULA (SFH, MFH, TH, AB)."""
-        code = str(tabula_row.get("Code_BuildingSizeClass", ""))
-        # Map TABULA codes to standard abbreviations
-        mapping = {"SFH": "SFH", "MFH": "MFH", "TH": "TH", "AB": "AB"}
-        return mapping.get(code, code)
+        return str(tabula_row.get("Code_BuildingSizeClass", ""))
 
     @staticmethod
     def _extract_construction_period(tabula_row: pd.Series) -> str:
         """Extract construction year class from TABULA."""
         return str(tabula_row.get("Code_ConstructionYearClass", ""))
 
-    @staticmethod
-    def _safe_float(
-        row: pd.Series, col: str, default: Optional[float]
-    ) -> Optional[float]:
-        """Read a float from a Series, returning *default* on NaN/missing."""
-        val = row.get(col)
-        if val is None or (isinstance(val, float) and math.isnan(val)):
-            return default
-        return float(val)
-
-
-# ── module-level helpers ─────────────────────────────────────────────────────
-
-
-def _classify_walls_by_direction(
-    walls_df: pd.DataFrame,
-) -> dict[str, list[str]]:
-    """Group wall element IDs by cardinal direction.
-
-    Uses the wall azimuth values to assign each wall to the nearest
-    cardinal direction bin (N/E/S/W).
-
-    Returns
-    -------
-    dict mapping direction name → list of wall element IDs (wall_1, wall_2, …)
-    """
-    result: dict[str, list[str]] = {
-        "north": [], "east": [], "south": [], "west": [],
-    }
-    for idx, (_, row) in enumerate(walls_df.iterrows(), start=1):
-        azimuth = float(row.get("azimuth", 0))
-        if azimuth < 0 or pd.isna(azimuth):
-            continue
-        azimuth = azimuth % 360.0
-        wall_id = f"wall_{idx}"
-        for direction, centre, lower, upper in _DIRECTION_BINS:
-            if direction == "north":
-                # North wraps around 0°
-                if azimuth >= lower or azimuth < upper:
-                    result[direction].append(wall_id)
-                    break
-            else:
-                if lower <= azimuth < upper:
-                    result[direction].append(wall_id)
-                    break
-
-    return result

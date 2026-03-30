@@ -9,6 +9,8 @@
       "id": "B001",
       "geometry": { "type": "Point", "coordinates": [ -0.1278, 51.5074 ] },
       "properties": {
+        "start_time": "2018-01-01T00:00:00Z",
+        "end_time": "2018-12-31T23:00:00Z",
         "buem": {
           "building_attributes": {
             "latitude": 51.5074,
