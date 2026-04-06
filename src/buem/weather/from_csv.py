@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+
 
 class CsvWeatherData:
     def __init__(self, csv_relative_path=None, cache_path=None):
@@ -26,8 +28,8 @@ class CsvWeatherData:
         df.index.name = 'datetime'
         if self.cache_path:
             df.reset_index().to_feather(self.cache_path)
-        return df       
-    
+        return df
+
     def extract_weather_columns(self):
         """Extracts required weather columns and renames them."""
         if self.df is None:
@@ -42,7 +44,7 @@ class CsvWeatherData:
         self.df = self.df[list(columns_map.keys())]
         self.df.rename(columns=columns_map, inplace=True)
         return self.df
-    
+
     def get_hourly(self, method='mean'):
         """Return hourly resampled data."""
         if method == 'mean':
@@ -82,7 +84,7 @@ class CsvWeatherData:
         pd.DataFrame
             Copy of self.df with DNI and DHI columns replaced by DISC-derived values.
         """
-        import pvlib
+        import pvlib  # type: ignore[import-untyped]
 
         if self.df is None:
             raise ValueError("Data not loaded. Call _load_and_prepare first.")
@@ -112,7 +114,8 @@ class CsvWeatherData:
         df_out["DHI"] = dhi_derived
         return df_out
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     import time
     start_time = time.time()
     loader = CsvWeatherData("data\\COSMO_Year__ix_389_660.csv")

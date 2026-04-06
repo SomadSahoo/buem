@@ -59,6 +59,65 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── version ──────────────────────────────────────────────────────────────
     sub.add_parser("version", help="Print the installed BuEM version")
 
+    # ── weather ──────────────────────────────────────────────────────────────
+    wx_p = sub.add_parser(
+        "weather",
+        help="COSMO-REA6 weather data processing pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Download, decompress, transform, and export COSMO-REA6 weather\n"
+            "data from DWD OpenData into a compressed NetCDF-4 file.\n\n"
+            "Sub-commands:\n"
+            "  buem weather run                     # full pipeline (all months)\n"
+            "  buem weather run --months 1          # single-month test\n"
+            "  buem weather run --skip-download     # skip download step\n"
+            "  buem weather validate                # check tools & environment\n"
+            "  buem weather info                    # show resolved configuration"
+        ),
+    )
+    wx_sub = wx_p.add_subparsers(dest="weather_command", metavar="ACTION")
+
+    # weather run
+    wx_run = wx_sub.add_parser("run", help="Execute the weather processing pipeline")
+    wx_run.add_argument(
+        "--year", type=int, default=None,
+        help="Year to process (default: from COSMO_YEAR env, or 2018)",
+    )
+    wx_run.add_argument(
+        "--months", type=int, nargs="+", default=None,
+        help="Month(s) to process, e.g. --months 1 2 3 (default: all 12)",
+    )
+    wx_run.add_argument(
+        "--work-dir", type=str, default=None,
+        help="Override pipeline working directory",
+    )
+    wx_run.add_argument(
+        "--output", type=str, default=None,
+        help="Override output NetCDF file path",
+    )
+    wx_run.add_argument(
+        "--skip-download", action="store_true", dest="skip_download",
+        help="Skip downloading (assume .grb.bz2 files present)",
+    )
+    wx_run.add_argument(
+        "--skip-decompress", action="store_true", dest="skip_decompress",
+        help="Skip decompression (assume .grb files present)",
+    )
+    wx_run.add_argument(
+        "--no-wind-components", action="store_true", dest="no_wind_components",
+        help="Exclude raw U_10M/V_10M from the output NetCDF",
+    )
+    wx_run.add_argument(
+        "--complevel", type=int, default=5,
+        help="zlib compression level for NetCDF (1-9, default: 5)",
+    )
+
+    # weather validate
+    wx_sub.add_parser("validate", help="Check required tools and libraries")
+
+    # weather info
+    wx_sub.add_parser("info", help="Show resolved pipeline configuration")
+
     # ── multibuilding ─────────────────────────────────────────────────────────
     mb_p = sub.add_parser(
         "multibuilding",
@@ -143,7 +202,8 @@ def main() -> None:
         res = run_model(cfg, plot=args.plot, use_milp=args.milp, return_models=True)
         print(f"Heating load total:               {res['heating'].sum():.1f} kWh/yr")
         print(f"Cooling load total:               {res['cooling'].sum():.1f} kWh/yr")
-        print(f"Total HVAC (heating + |cooling|): {float(np.sum(res['heating']) + np.sum(np.abs(res['cooling']))):.1f} kWh/yr")
+        hvac = float(np.sum(res['heating']) + np.sum(np.abs(res['cooling'])))
+        print(f"Total HVAC (heating + |cooling|): {hvac:.1f} kWh/yr")
         print(f"Execution time:                   {res['elapsed_s']:.2f} s")
 
     # ── api ──────────────────────────────────────────────────────────────────
@@ -187,6 +247,10 @@ def main() -> None:
     elif args.command == "version":
         from buem import __version__
         print(f"buem {__version__}")
+
+    # ── weather ──────────────────────────────────────────────────────────────
+    elif args.command == "weather":
+        _run_weather(args)
 
     # ── multibuilding ─────────────────────────────────────────────────────────
     elif args.command == "multibuilding":
@@ -250,6 +314,75 @@ def main() -> None:
         from buem.parallelization.run_multibuilding_demo import main as mb_main
 
         mb_main()
+
+
+def _run_weather(args) -> None:
+    """Handle all ``buem weather`` sub-commands."""
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if args.weather_command is None:
+        print("Usage: buem weather {run|validate|info}")
+        print("Run 'buem weather --help' for details.")
+        sys.exit(1)
+
+    if args.weather_command == "validate":
+        from buem.weather.pipeline import validate_environment
+
+        issues = validate_environment()
+        if issues:
+            print("Weather pipeline environment issues:")
+            for issue in issues:
+                print(f"  [!] {issue}")
+            sys.exit(1)
+        else:
+            print("Weather pipeline environment OK — all tools available.")
+
+    elif args.weather_command == "info":
+        from buem.weather.config import ATTRIBUTES, get_config
+
+        cfg = get_config()
+        print("COSMO-REA6 Weather Pipeline Configuration")
+        print("=" * 50)
+        print(f"  Year:             {cfg['year']}")
+        print(f"  Months:           {cfg['months']}")
+        print(f"  Attributes:       {cfg['attributes']}")
+        print(f"  Work directory:   {cfg['work_dir']}")
+        print(f"  Download dir:     {cfg['download_dir']}")
+        print(f"  Decompress dir:   {cfg['decompress_dir']}")
+        print(f"  Output dir:       {cfg['output_dir']}")
+        print(f"  Base URL:         {cfg['base_url']}")
+        print(f"  CPU cores:        {cfg['ncores']}")
+        print(f"  Threads/job:      {cfg['threads_per_job']}")
+        print(f"  Decompressor:     {cfg['decompressor'] or '(auto-detect)'}")
+        print(f"  Conda env:        {cfg['conda_env']}")
+        print(f"  SLURM partition:  {cfg['slurm_partition']}")
+        print()
+        print("Attribute definitions:")
+        for name, meta in ATTRIBUTES.items():
+            print(f"  {name:<16s}  {meta['unit_raw']:>6s} → {meta['unit_target']:<6s}  {meta['description']}")
+
+    elif args.weather_command == "run":
+        from pathlib import Path
+
+        from buem.weather.pipeline import run_pipeline
+
+        nc_path = run_pipeline(
+            year=args.year,
+            months=args.months,
+            work_dir=Path(args.work_dir) if args.work_dir else None,
+            output_path=Path(args.output) if args.output else None,
+            include_wind_components=not args.no_wind_components,
+            complevel=args.complevel,
+            skip_download=args.skip_download,
+            skip_decompress=args.skip_decompress,
+        )
+        print(f"\nOutput: {nc_path}")
 
 
 def _run_validate() -> None:

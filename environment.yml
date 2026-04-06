@@ -25,6 +25,13 @@ dependencies:
   - scipy
   - setuptools-scm>=8
   - sympy
+  # Weather processing (server-side GRIB/NetCDF pipeline)
+  - cfgrib
+  - dask
+  - eccodes
+  - netcdf4
+  - pyproj
+  - xarray
   # Documentation
   - sphinx>=9.0.0
   - sphinx_rtd_theme>=3.0.0

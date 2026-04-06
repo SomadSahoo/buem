@@ -4,14 +4,17 @@ channels:
   - default
 dependencies:
   - python=3.13
+  - cfgrib
   - coincbc
   - cvxpy
+  - eccodes
   - flask
   - flask-swagger-ui
   - gunicorn
   - joblib
   - jsonschema
   - matplotlib
+  - netcdf4
   - numba
   - numpy
   - openpyxl
@@ -21,10 +24,12 @@ dependencies:
   - pulp
   - pvlib
   - pyarrow
+  - pyproj
   - python-dotenv
   - scipy
   - setuptools-scm>=8
   - sympy
+  - xarray
   - pip
   - pip:
     - marshmallow>=4.0.0
