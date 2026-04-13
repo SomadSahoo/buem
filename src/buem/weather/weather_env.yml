@@ -15,7 +15,6 @@ dependencies:
   # --- Weather pipeline core (alphabetical) ---
   - cfgrib
   - dask
-  - distributed           # dask.distributed for multi-worker parallelism
   - eccodes
   - lbzip2                # fast parallel bzip2 decompressor
   - netcdf4

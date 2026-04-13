@@ -66,6 +66,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--skip-decompress", action="store_true",
         help="Skip decompress step (assume .grb files exist).",
     )
+    run_p.add_argument(
+        "--cleanup", action="store_true",
+        help="Remove downloaded and decompressed files after export.",
+    )
 
     return parser
 
@@ -93,13 +97,9 @@ def main(argv: list[str] | None = None) -> None:
         keys = [
             "year", "months", "attributes", "work_dir", "download_dir",
             "decompress_dir", "output_dir", "base_url", "ncores",
-            "threads_per_job", "decompressor", "conda_env",
-            "slurm_partition",
         ]
         for key in keys:
             val = cfg.get(key, "")
-            if key == "decompressor" and not val:
-                val = "(auto-detect)"
             print(f"  {key:<18s}  {val}")
         print()
         print("Attribute definitions:")
@@ -135,6 +135,7 @@ def main(argv: list[str] | None = None) -> None:
             complevel=args.complevel,
             skip_download=args.skip_download,
             skip_decompress=args.skip_decompress,
+            cleanup=args.cleanup,
         )
         print(f"\nOutput: {nc_path}")
 

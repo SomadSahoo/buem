@@ -46,6 +46,7 @@ def run_pipeline(
     complevel: int = 1,
     skip_download: bool = False,
     skip_decompress: bool = False,
+    cleanup: bool = False,
 ) -> Path:
     """Execute the full weather processing pipeline.
 
@@ -135,8 +136,19 @@ def run_pipeline(
     # Step 4: Export
     logger.info("STEP 4/4: Exporting to NetCDF")
     t4 = time.perf_counter()
-    nc_path = export_netcdf(ds, output_path=output_path, complevel=complevel, year=year)
+    nc_path = export_netcdf(ds, output_path=output_path, complevel=complevel, year=year, months=months)
     logger.info("  Export completed in %.1f s", time.perf_counter() - t4)
+
+    # Step 5: Cleanup (optional)
+    if cleanup:
+        import shutil
+
+        logger.info("STEP 5: Cleaning up downloaded and decompressed files")
+        for dir_key in ("download_dir", "decompress_dir"):
+            d = Path(cfg[dir_key])
+            if d.exists():
+                shutil.rmtree(d)
+                logger.info("  Removed %s", d)
 
     elapsed = time.perf_counter() - t0
     logger.info("=" * 60)
