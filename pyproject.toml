@@ -31,8 +31,8 @@ classifiers = [
 dependencies = [
     "cfgrib",
     "cvxpy",
-    "eccodes",
     "dask",
+    "eccodes",
     "flask",
     "flask-swagger-ui",
     "joblib",
@@ -71,11 +71,10 @@ server = [
     "gunicorn",
 ]
 dev = [
+    "mypy",
     "pytest",
     "pytest-cov",
-    "black",
-    "flake8",
-    "mypy",
+    "ruff",
 ]
 
 [project.scripts]
@@ -96,8 +95,11 @@ buem = [
 version_file = "src/buem/_version.py"
 fallback_version = "0.1.3"
 
-[tool.black]
+[tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
+extend-ignore = ["E203", "W503"]
 
 [tool.mypy]
 ignore_missing_imports = true

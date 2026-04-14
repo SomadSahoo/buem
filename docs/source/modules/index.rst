@@ -12,7 +12,7 @@ users and developers.
    buildings
    thermal
    config
-   weather
+   weather/index
    occupancy
    apis
    integration

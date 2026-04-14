@@ -5,13 +5,17 @@ channels:
 dependencies:
   - python=3.13
   # Core scientific
+  - cfgrib
   - coincbc
   - cvxpy
+  - dask
+  - eccodes
   - flask
   - flask-swagger-ui
   - joblib
   - jsonschema
   - matplotlib
+  - netcdf4
   - numba
   - numpy
   - openpyxl
@@ -21,17 +25,17 @@ dependencies:
   - pulp
   - pvlib
   - pyarrow
+  - pyproj
   - python-dotenv
   - scipy
   - setuptools-scm>=8
   - sympy
-  # Weather processing (server-side GRIB/NetCDF pipeline)
-  - cfgrib
-  - dask
-  - eccodes
-  - netcdf4
-  - pyproj
   - xarray
+  # Development
+  - mypy
+  - pytest
+  - pytest-cov
+  - ruff
   # Documentation
   - sphinx>=9.0.0
   - sphinx_rtd_theme>=3.0.0
